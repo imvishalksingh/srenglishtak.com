@@ -28,13 +28,27 @@ public class ErrorHandler {
   }
 
   @ExceptionHandler(DuplicateKeyException.class)
-  ResponseEntity<?> duplicate() {
-    return response(409, "This record or attempt already exists");
+  ResponseEntity<?> duplicate(DuplicateKeyException ex) {
+    return bookProductConflict(ex)
+        ? api(ApiException.bookProductAlreadyAssigned())
+        : response(409, "This record or attempt already exists");
   }
 
   @ExceptionHandler(DataIntegrityViolationException.class)
-  ResponseEntity<?> integrity() {
-    return response(400, "Invalid data or referenced resource");
+  ResponseEntity<?> integrity(DataIntegrityViolationException ex) {
+    return bookProductConflict(ex)
+        ? api(ApiException.bookProductAlreadyAssigned())
+        : response(400, "Invalid data or referenced resource");
+  }
+
+  private boolean bookProductConflict(Throwable error) {
+    // The unique index is still the final authority when concurrent writes race the precheck.
+    int depth = 0;
+    for (Throwable cause = error; cause != null && depth++ < 20; cause = cause.getCause()) {
+      if (cause instanceof org.hibernate.exception.ConstraintViolationException violation
+          && "uq_book_android_product".equals(violation.getConstraintName())) return true;
+    }
+    return false;
   }
 
   @ExceptionHandler({

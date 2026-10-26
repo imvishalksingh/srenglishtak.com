@@ -16,6 +16,11 @@ public class ApiException extends RuntimeException {
     return new ApiException(400, message);
   }
 
+  public static ApiException bookProductAlreadyAssigned() {
+    return new ApiException(409,
+        "This Google Play product ID is already assigned to another book. Use a different product ID for each book");
+  }
+
   public static ApiException missing() {
     return new ApiException(404, "Resource not found");
   }

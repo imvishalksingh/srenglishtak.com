@@ -10,9 +10,9 @@ Back up the database. Apply `db/003_purchases_and_limits.sql` after migrations 0
 
 Migration 003 creates the purchase ledger, checkout orders, revocation records, shared rate-limit counters, and logout-token revocations. It creates a private Supabase bucket named `book-files` and a restrictive Storage policy that prevents direct `anon`/`authenticated` access to that bucket, including when an older permissive policy exists. The backend's server role gets table access when that role was provisioned as described in README.
 
-Use the dashboard's **Book File** upload to put PDF/EPUB documents in `book-files`. Cover images and public CBSE materials continue to use the existing public `books` bucket. Do not make `book-files` public or grant browser/mobile roles direct read policies. Admin publishing and streaming check the bucket's private status. Publishing checks that the private object exists.
+Use the dashboard's **Book File** upload to put PDF documents in `book-files`. Public uploads now accept cover/other images only; PDF/EPUB public uploads are rejected. Protected editions must be PDF. Do not make `book-files` public or grant browser/mobile roles direct read policies. Publishing and page rendering check the bucket's private status; publishing checks that the private object exists.
 
-Public catalog/progress/recommendation responses do not reveal book file locations. Clients download through `/api/books/{id}/stream` using their access token. The server checks visibility/ownership and sends `Cache-Control: private, no-store`. Downloaded content can still be copied by someone who legitimately receives it; this is access control, not DRM.
+Public catalog/progress/recommendation responses do not reveal book file locations. `/api/books/{id}/stream` is retired with HTTP 410, including for purchasers/admins. The protected Android reader uses short-lived, attested sessions and device-signed requests for server-watermarked page images. Follow [PROTECTED_READER_SETUP.md](PROTECTED_READER_SETUP.md), including migration 004 and the coordinated Play/backend rollout. Website purchases unlock reading in the Android app; the website no longer offers original downloads.
 
 Existing books keep price 0 until an admin changes them. To sell a previously public book, upload a private copy and remove its old public Storage object first. The publishing check rejects a previously public URL that remains reachable. Keep backups privately; do not leave equivalent copies publicly hosted. An object already downloaded cannot be recalled. Historical free access is not converted into a purchase.
 
@@ -37,7 +37,7 @@ The app message `Book purchases are not configured yet` means `/api/payments/con
 5. Deploy the updated Dockerfile. Its non-root app user also belongs to group `1000`, as Render requires for runtime secret-file access. Never copy the JSON into the image.
 6. Add the phone's purchasing Google account as a Play Console **license tester**, and confirm the mapped one-time product and its purchase option are active. The installed debug APK can use Play test billing for a license tester with the matching package name. Complete purchase, restart/restore, and refund tests with Google's test payment instruments before live activation.
 
-Expected context after configuration: `environment: test`, `android_enabled: true`. Razorpay remains disabled until its real test keys and webhook secret are supplied. The Play catalog contains `book_english_grammar_01`, with an ACTIVE buy option, legacy compatibility and India availability. The paid book in the live app catalog currently maps to `book_english_grammer_01` (spelling mismatch). Correct the book product ID in the admin dashboard to `book_english_grammar_01` before attempting checkout. Do not remap a book with recorded purchases; review purchase history first.
+Expected context after configuration: `environment: test`, `android_enabled: true`. Razorpay remains disabled until its real test keys and webhook secret are supplied. The existing paid book uses `book_english_grammar_01`, with an ACTIVE buy option, legacy compatibility and India availability. Each additional paid book needs its own Google Play one-time product ID. Create/activate that product and its buy option in Play Console, then use the exact ID in the book form. A product ID cannot be assigned to two books. Existing purchased mappings cannot be changed.
 
 References: [Render runtime secret files](https://render.com/docs/docker-secrets#accessing-secret-files-at-runtime), [Render environment settings](https://render.com/docs/configure-environment-variables), [Google Play API setup](https://developers.google.com/android-publisher/getting_started), [Google Play license testing](https://developer.android.com/google/play/billing/test).
 
@@ -45,7 +45,7 @@ References: [Render runtime secret files](https://render.com/docs/docker-secrets
 
 Create an active **one-time / non-consumable product** for each book, with a permanent unique product ID such as `readiq.book.english_basics`. Set pricing, availability and the purchase option in Play Console. The old `sr_english_tak_premium` global product is not used by this integration.
 
-In the dashboard Books form, upload the private PDF/EPUB, set the INR website price, enter that book's Google Play product ID, then publish it. Google Play's displayed price comes from Play Console and may differ from the website's INR price. One product ID cannot map to multiple books, and a purchased product mapping cannot be changed. Books with payment records must be hidden rather than deleted.
+In the dashboard Books form, upload the private PDF, set the INR website price, enter that book's Google Play product ID, then publish it. Google Play's displayed price comes from Play Console and may differ from the website's INR price. One product ID cannot map to multiple books, and a purchased product mapping cannot be changed. Books with payment records must be hidden rather than deleted.
 
 Use `PAYMENTS_MODE=test` on a dedicated test deployment and add a license tester in Play Console. Prefer an internal testing track with the correct application ID and signing. Use Google's test payment instruments; do not use real money on the test deployment. Buy while signed into the intended SR English Tak account. Purchases are bound to that account and cannot be reassigned by changing phones or submitting the receipt under another login.
 
@@ -89,3 +89,11 @@ Do not mark live checkout verified until the account setup, product activation, 
 - [Razorpay API keys](https://razorpay.com/docs/payments/dashboard/account-settings/api-keys/)
 - [Razorpay checkout integration](https://razorpay.com/docs/payments/payment-gateway/web-integration/standard/integration-steps/)
 - [Razorpay webhook validation](https://razorpay.com/docs/webhooks/validate-test/)
+
+Protected-reader changes supersede earlier raw-stream instructions. Existing purchased access remains server-side; test and live payment environments remain separate.
+
+### Book creation: product ID already used
+
+The phone's full create payload was checked against the live backend using temporary hidden fixtures: free PDF and paid PDF with a new product ID both returned 201. Reusing that ID for a second paid book reproduced `400 Invalid data or referenced resource`; the user confirmed reusing the existing product ID. All temporary books and the disposable account were removed.
+
+The backend now trims product IDs and returns an explicit 409 conflict before inserting/updating a duplicate mapping. The database unique index is retained; a concurrent unique-index conflict gets the same actionable response. Other database errors remain generic. The actual backend passed 47 tests, including the mobile payload, duplicate create/update and conflict fallback. This error-message improvement needs a backend commit/deploy; the current app can already create a book with a distinct correctly configured product ID, without a new APK/AAB.

@@ -553,6 +553,43 @@ class BackendIntegrationTest {
         assertTrue(actual.contains(route.replaceAll(":[^/]+", "{}")), "Missing route: " + route);
   }
 
+  @Test
+  void phoneBookPayloadCreatesFreeAndPaidBooksWithBlankCoverAndNullableProduct() throws Exception {
+    var body = map("title", "Mobile upload", "author", "", "description", "", "category", "Classic Literature",
+        "format_type", "pdf", "file_url", "http://127.0.0.1:9/storage/v1/object/authenticated/book-files/mobile.pdf",
+        "cover_url", "", "is_visible", true, "price_paise", 0, "currency", "INR", "android_product_id", null);
+    var free = postJson("/api/books", "admin", body, 201);
+    assertEquals(0, free.path("price_paise").asInt());
+    assertTrue(free.path("android_product_id").isNull());
+    body.put("title", "Mobile paid upload");
+    body.put("price_paise", 29900);
+    body.put("android_product_id", "book.mobile_upload_01");
+    var paid = postJson("/api/books", "admin", body, 201);
+    assertEquals("book.mobile_upload_01", paid.path("android_product_id").asText());
+    assertEquals(29900, paid.path("price_paise").asInt());
+  }
+
+  @Test
+  void duplicateBookProductsGiveAConflictAndEditingTheSameMappingIsAllowed() throws Exception {
+    String first = paidBook().path("id").asText();
+    var body = map("title", "Another paid book", "format_type", "pdf", "price_paise", 100,
+        "android_product_id", "readiq.book.fixture",
+        "file_url", "http://127.0.0.1:9/storage/v1/object/authenticated/book-files/another.pdf");
+    var conflict = postJson("/api/books", "admin", body, 409);
+    assertEquals(ApiException.bookProductAlreadyAssigned().getMessage(), conflict.path("error").asText());
+    body.put("android_product_id", "  book.another_01  ");
+    var another = postJson("/api/books", "admin", body, 201);
+    assertEquals("book.another_01", another.path("android_product_id").asText());
+    mvc.perform(request(patch("/api/books/" + another.path("id").asText()), "admin")
+        .contentType("application/json").content(json.writeValueAsString(map("android_product_id", "readiq.book.fixture"))))
+        .andExpect(status().isConflict())
+        .andExpect(jsonPath("$.error").value(ApiException.bookProductAlreadyAssigned().getMessage()));
+    mvc.perform(request(patch("/api/books/" + first), "admin")
+        .contentType("application/json").content(json.writeValueAsString(map("android_product_id", "readiq.book.fixture"))))
+        .andExpect(status().isOk());
+    assertEquals(2, jdbc.queryForObject("select count(*) from books", Integer.class));
+  }
+
   private JsonNode paidBook() throws Exception {
     return postJson(
         "/api/books",

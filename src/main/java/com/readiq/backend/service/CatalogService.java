@@ -94,11 +94,20 @@ public class CatalogService {
     choice(values, "material_type", "model_paper", "pyq", "notes", "syllabus");
     if (table.equals("books")) {
       var previous = id == null ? Map.<String, Object>of() : db.byId("books", id);
-      if (values.get("android_product_id") instanceof String product) {
+      if (values.get("android_product_id") instanceof String suppliedProduct) {
+        String product = suppliedProduct.trim();
         if (product.isBlank()) values.put("android_product_id", null);
-        else if (!product.matches("[a-z][a-z0-9_.]{2,149}"))
-          throw ApiException.bad("Invalid Android product ID");
+        else {
+          if (!product.matches("[a-z][a-z0-9_.]{2,149}"))
+            throw ApiException.bad("Invalid Android product ID");
+          values.put("android_product_id", product);
+        }
       }
+      String product = Objects.toString(values.getOrDefault("android_product_id", previous.get("android_product_id")), "");
+      if (!product.isBlank()
+          && db.count("select count(*) from books where android_product_id=?" + (id == null ? "" : " and id<>?"),
+              id == null ? new Object[] {product} : new Object[] {product, id}) > 0)
+        throw ApiException.bookProductAlreadyAssigned();
       if (id != null
           && values.containsKey("android_product_id")
           && !Objects.equals(values.get("android_product_id"), previous.get("android_product_id"))
