@@ -1,0 +1,76 @@
+# Maven / Java build output
+target/
+out/
+*.class
+*.jar
+*.jar.original
+!/.mvn/wrapper/maven-wrapper.jar
+*.war
+*.ear
+dependency-reduced-pom.xml
+pom.xml.versionsBackup
+pom.xml.releaseBackup
+pom.xml.next
+release.properties
+
+# Local environment and secret configuration (keep safe example templates)
+.env
+.env.*
+*.env
+!.env.example
+!.env.*.example
+!*.env.example
+application-local.properties
+application-local.yml
+application-local.yaml
+application-secrets.properties
+application-secrets.yml
+application-secrets.yaml
+/secrets/
+/credentials/
+*.key
+*.pem
+*.p12
+*.pfx
+*.jks
+*.keystore
+*service-account*.json
+
+# IDE and editor workspace files
+.idea/
+.vscode/
+*.iml
+*.ipr
+*.iws
+.classpath
+.project
+.settings/
+.factorypath
+
+# Logs, runtime data and disposable test databases
+*.log
+logs/
+*.pid
+.test-postgres/
+test-results/
+coverage/
+/uploads/
+/backups/
+/dumps/
+*.dump
+*.sql.gz
+
+# Local caches and temporary files
+.cache/
+tmp/
+temp/
+*.tmp
+*.swp
+*.swo
+*~
+
+# OS metadata
+.DS_Store
+._*
+Thumbs.db
+desktop.ini

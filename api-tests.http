@@ -1,0 +1,23 @@
+@base = http://localhost:8080
+@accessToken = REPLACE_WITH_A_USER_ACCESS_TOKEN
+@adminToken = REPLACE_WITH_AN_ADMIN_ACCESS_TOKEN
+
+### Liveness
+GET {{base}}/health
+
+### Public catalog
+GET {{base}}/api/books
+
+### Password login
+POST {{base}}/api/auth/login
+Content-Type: application/json
+
+{"email":"YOUR_EMAIL","password":"YOUR_PASSWORD"}
+
+### Own profile
+GET {{base}}/api/auth/me
+Authorization: Bearer {{accessToken}}
+
+### Admin dashboard
+GET {{base}}/api/admin/stats
+Authorization: Bearer {{adminToken}}

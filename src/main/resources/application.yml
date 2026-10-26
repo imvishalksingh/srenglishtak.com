@@ -1,0 +1,46 @@
+server:
+  port: ${PORT:8080}
+  forward-headers-strategy: none
+  error:
+    include-message: never
+    include-stacktrace: never
+  tomcat:
+    max-http-form-post-size: 52MB
+spring:
+  application:
+    name: readiq-backend
+  config:
+    import: optional:file:.env[.properties]
+  datasource:
+    url: ${DB_URL}
+    username: ${DB_USER}
+    password: ${DB_PASSWORD}
+    driver-class-name: org.postgresql.Driver
+    hikari:
+      maximum-pool-size: ${DB_POOL_SIZE:10}
+      minimum-idle: 2
+      connection-timeout: 10000
+  servlet:
+    multipart:
+      max-file-size: 50MB
+      max-request-size: 52MB
+  jackson:
+    deserialization:
+      fail-on-trailing-tokens: true
+supabase:
+  url: ${SUPABASE_URL}
+  key: ${SUPABASE_ANON_KEY}
+  service-role-key: ${SUPABASE_SERVICE_ROLE_KEY}
+cors:
+  allowed-origins: ${ALLOWED_ORIGINS:http://localhost:5173,http://localhost:3000}
+security:
+  allow-admin-registration: ${ALLOW_ADMIN_REGISTRATION:false}
+  admin-registration-secret: ${ADMIN_REGISTRATION_SECRET:}
+  password-reset-redirect: ${PASSWORD_RESET_REDIRECT_URL:}
+  trusted-proxy-ips: ${TRUSTED_PROXY_IPS:}
+app:
+  timezone: ${APP_TIMEZONE:Asia/Kolkata}
+logging:
+  level:
+    org.springframework.web: WARN
+    org.springframework.security: WARN
