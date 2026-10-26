@@ -1,6 +1,6 @@
 # ReadIQ / SR English Tak Spring backend
 
-Java 21, Spring Boot 3.5.16, PostgreSQL, Supabase Auth and Storage.
+Java 21, Spring Boot 4.0.9, Spring Data JPA, PostgreSQL, Supabase Auth and Storage.
 Node/Express is not required to run this backend. The Flutter app, its built-in admin screens,
 and the React admin dashboard use this API.
 
@@ -9,7 +9,7 @@ and the React admin dashboard use this API.
 1. Configure the same Supabase project that contains the current app data.
 2. For an existing database, apply db/002_security_and_contract.sql using a database owner.
    For a fresh Supabase project, apply db/001_schema.sql, then db/002_security_and_contract.sql.
-   These scripts are not executed automatically at startup.
+   Then apply db/003_purchases_and_limits.sql. These scripts are not executed automatically at startup.
 3. Copy .env.example to .env and fill in the server-only credentials. The .env file is
    read as Java properties: use plain KEY=value lines without shell quotes.
 4. In Supabase Auth, enable Google and configure the Google web client ID used by Flutter and
@@ -35,7 +35,7 @@ The migration never promotes a user profile to admin.
 
 ## Security and client contract
 
-- Existing admins are resolved from profiles.role after Supabase validates the access token.
+- Existing admins are resolved from profiles.role on every request. ES256/RS256 access tokens are verified locally against this Supabase project's JWKS with issuer/audience/expiry checks; legacy tokens are verified by Supabase and may be cached for up to AUTH_CACHE_SECONDS (0–60, default 30).
   Public registration creates regular users; admin registration is disabled by default.
   Provision trusted admins through a controlled database operation.
 - Writes use explicit field allowlists and bound SQL parameters. User resources derive their
@@ -57,23 +57,23 @@ The migration never promotes a user profile to admin.
 - Migration 002 revokes direct anon/authenticated access to all application tables,
   including answer keys and profile roles. All app data must go through Spring.
   Review other applications that directly use those tables before applying it.
-  Supabase Auth APIs and existing public Storage object URLs remain separate.
-- Uploads allow PDF, EPUB, PNG, JPEG, GIF and WebP up to 50 MiB, with content signature checks.
+  Supabase Auth APIs and public cover/CBSE URLs remain separate. Book files use a private bucket as described in PAYMENTS_SETUP.md.
+- Uploads allow PDF, EPUB, PNG, JPEG, GIF and WebP up to 50 MiB, with content signature checks. EPUB ZIP expansion is bounded to 100 MiB and 3,000 entries.
   JSON requests are bounded to 1 MiB. Storage streaming restricts credentialed downloads to
   this project's books bucket and does not follow redirects.
-- Authentication attempts and uploads have bounded per-IP rate limits. Forwarded IP headers
-  are trusted only from configured proxy IPs. For multiple replicas, configure distributed
-  rate limiting at the ingress; in-memory buckets are local to each instance.
+- Authentication attempts, payment requests and uploads have per-IP rate limits coordinated through PostgreSQL across all replicas. Forwarded IP headers
+  are trusted only from configured proxy IPs. Configure
+  additional limits at the ingress for traffic spikes in addition to these shared database counters.
 
-All 69 Node route method/path pairs are retained. Spring also keeps the additional useful
+All 69 Node route method/path pairs are retained. Book metadata keeps the flat JSON fields but redacts file_url for ordinary users; upgraded readers download authenticated streams. Spring also keeps the additional useful
 read/stream/question routes and adds challenge update/start. The contract fixture is in
 src/test/resources/node-contract-routes.txt. Challenge submission and answer disclosure are
 intentional security changes: deploy the updated Flutter client with this backend.
 
 ## Configure the clients
 
-Flutter development uses localhost:8080 (Android emulator: 10.0.2.2:8080). For a physical device,
-provide a reachable development URL. Release builds require an explicit HTTPS URL:
+Flutter currently defaults to https://srenglishtak-com.onrender.com/api. Override API_BASE_URL
+for a different deployment or local development (Android emulator: 10.0.2.2:8080):
 
 ~~~powershell
 flutter run --dart-define=API_BASE_URL=http://10.0.2.2:8080/api
@@ -92,7 +92,7 @@ Set VITE_GOOGLE_CLIENT_ID to override the existing public OAuth client ID. The d
 sessions and clears them on logout/invalid refresh. Flutter serializes concurrent token refreshes
 to avoid rotating the same refresh token in parallel.
 
-The marketing website currently has no backend calls. Node source remains as a historical
+The website includes a book store at /books, connected to this API. Node source remains as a historical
 reference; do not route new client builds to it.
 
 ## Tests
@@ -121,5 +121,24 @@ database migration, configure HTTPS/CORS/Google provider, and smoke-test user/ad
 directing a release build to it. A switch to Spring does not itself deploy the service or move the
 existing Vercel domain.
 
-Dependency baseline: [Spring Boot requirements](https://docs.spring.io/spring-boot/3.5/system-requirements.html).
+Dependency baseline: [Spring Boot requirements](https://docs.spring.io/spring-boot/4.0/system-requirements.html).
 Google flow: [Supabase ID token sign-in](https://supabase.com/docs/reference/javascript/auth-signinwithidtoken).
+
++
++## Architecture and purchases
++
++Entity writes use Hibernate/JPA mappings for all 23 existing app tables. The BookRepository is
++used for typed book lookups. Complex scoring locks, atomic upserts, and report projections use
++parameterized JDBC in the same Spring-managed transaction/connection. JPA entities are not
++serialized directly to clients. Presence-aware typed request DTOs preserve PATCH null-versus-
++omission behavior, and typed book/auth/payment responses document their contracts. Read/report
++projections still use maps where joins have different shapes; further DTO conversion can be incremental.
++
++OpenAPI JSON is /v3/api-docs and Swagger UI is /swagger-ui/index.html when
++API_DOCS_ENABLED=true. Documentation is disabled by default. JPA open-in-view is disabled and
++ddl-auto=none; only reviewed SQL migrations change the schema.
++
++See [PAYMENTS_SETUP.md](PAYMENTS_SETUP.md) for Android per-book non-consumable purchases,
++Razorpay test/live checkout, private storage, account setup, restore/refunds, and deployment order.
++Payments default to disabled. iOS buying is not implemented in this release.
++

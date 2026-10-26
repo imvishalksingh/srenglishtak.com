@@ -1,37 +1,86 @@
 package com.readiq.backend.security;
+
 import jakarta.servlet.*;
 import jakarta.servlet.http.*;
-import org.springframework.web.filter.OncePerRequestFilter;
 import java.io.IOException;
 import java.util.*;
-/** Bounded fixed-window buckets; use ingress/distributed limits when running multiple replicas. */
+import org.springframework.web.filter.OncePerRequestFilter;
+
+/**
+ * Shared fixed-window counters; forwarding headers are trusted only at configured ingress
+ * addresses.
+ */
 public class RateLimitFilter extends OncePerRequestFilter {
-    private record Window(long expires,int used){}
-    private final Map<String,Window>windows=new HashMap<>();
-    private final Set<String>trusted;
-    public RateLimitFilter(String proxies){trusted=new HashSet<>(Arrays.stream(proxies.split(",")).map(String::trim).toList());}
-    private synchronized boolean consume(String key,int max,long millis){
-        long now=System.currentTimeMillis();
-        if(windows.size()>10000)windows.entrySet().removeIf(e->e.getValue().expires<now);
-        Window w=windows.get(key);
-        if(w==null||w.expires<now){if(windows.size()>=50000)return false;windows.put(key,new Window(now+millis,1));return true;}
-        if(w.used>=max)return false;windows.put(key,new Window(w.expires,w.used+1));return true;
+  private final Set<String> trusted;
+  private final RateLimitStore store;
+
+  public RateLimitFilter(String proxies, RateLimitStore store) {
+    trusted = new HashSet<>(Arrays.stream(proxies.split(",")).map(String::trim).toList());
+    this.store = store;
+  }
+
+  @Override
+  protected void doFilterInternal(
+      HttpServletRequest req, HttpServletResponse res, FilterChain chain)
+      throws IOException, ServletException {
+    if ("OPTIONS".equals(req.getMethod())
+        || ("GET".equals(req.getMethod())
+            && Set.of("/", "/health").contains(req.getRequestURI()))) {
+      chain.doFilter(req, res);
+      return;
     }
-    @Override protected void doFilterInternal(HttpServletRequest req,HttpServletResponse res,FilterChain chain)throws IOException,ServletException{
-        if("OPTIONS".equals(req.getMethod())){chain.doFilter(req,res);return;}
-        String path=req.getRequestURI(),ip=req.getRemoteAddr();
-        if(trusted.contains(ip)){
-            String forwarded=req.getHeader("X-Forwarded-For");
-            if(forwarded!=null){String[]hops=forwarded.split(",");for(int i=hops.length-1;i>=0;i--){
-                String candidate=hops[i].trim();if(!candidate.matches("[0-9a-fA-F:.]{2,64}"))break;ip=candidate;if(!trusted.contains(candidate))break;
-            }}
+    String path = req.getRequestURI(), ip = req.getRemoteAddr();
+    if (trusted.contains(ip)) {
+      String forwarded = req.getHeader("X-Forwarded-For");
+      if (forwarded != null) {
+        String[] hops = forwarded.split(",");
+        for (int i = hops.length - 1; i >= 0; i--) {
+          String candidate = hops[i].trim();
+          if (!candidate.matches("[0-9a-fA-F:.]{2,64}")) break;
+          ip = candidate;
+          if (!trusted.contains(candidate)) break;
         }
-        boolean strict=Set.of("/api/auth/login","/api/auth/register","/api/auth/google","/api/auth/forgot-password").contains(path);
-        String group=strict?"auth":path.equals("/api/upload")?"upload":"api";int max=strict?10:group.equals("upload")?20:1000;
-        if(!consume(group+":"+ip,max,group.equals("upload")?60000:900000)){
-            res.setStatus(429);res.setHeader("Retry-After",group.equals("upload")?"60":"900");res.setContentType("application/json");
-            res.getWriter().write("{\"error\":\"Too many requests. Please try again later.\"}");return;
-        }
-        chain.doFilter(req,res);
+      }
     }
+    boolean strict =
+        Set.of(
+                "/api/auth/login",
+                "/api/auth/register",
+                "/api/auth/google",
+                "/api/auth/forgot-password")
+            .contains(path);
+    String group =
+        strict
+            ? "auth"
+            : path.equals("/api/auth/refresh")
+                ? "refresh"
+                : path.equals("/api/upload")
+                    ? "upload"
+                    : path.startsWith("/api/payments/") && !path.endsWith("/webhook")
+                        ? "payment"
+                        : "api";
+    int max =
+        strict
+            ? 10
+            : group.equals("upload")
+                ? 20
+                : Set.of("payment", "refresh").contains(group) ? 60 : 1000;
+    boolean allowed;
+    try {
+      allowed = store.consume(group + ":" + ip, max, group.equals("upload") ? 60000 : 900000);
+    } catch (org.springframework.dao.DataAccessException ex) {
+      res.setStatus(503);
+      res.setContentType("application/json");
+      res.getWriter().write("{\"error\":\"Request protection unavailable\"}");
+      return;
+    }
+    if (!allowed) {
+      res.setStatus(429);
+      res.setHeader("Retry-After", group.equals("upload") ? "60" : "900");
+      res.setContentType("application/json");
+      res.getWriter().write("{\"error\":\"Too many requests. Please try again later.\"}");
+      return;
+    }
+    chain.doFilter(req, res);
+  }
 }

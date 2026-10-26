@@ -2,5 +2,14 @@ target
 .git
 .idea
 .env
+.env.*
+!.env.example
+secrets
+credentials
+*service-account*.json
+*.key
+*.pem
+*.p12
+*.pfx
 .test-postgres
 *.log

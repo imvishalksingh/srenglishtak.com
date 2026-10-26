@@ -20,13 +20,24 @@ spring:
       maximum-pool-size: ${DB_POOL_SIZE:10}
       minimum-idle: 2
       connection-timeout: 10000
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: none
+    properties:
+      hibernate:
+        jdbc.time_zone: UTC
   servlet:
     multipart:
       max-file-size: 50MB
       max-request-size: 52MB
   jackson:
+    use-jackson2-defaults: true
     deserialization:
       fail-on-trailing-tokens: true
+      accept-float-as-int: false
+    mapper:
+      allow-coercion-of-scalars: false
 supabase:
   url: ${SUPABASE_URL}
   key: ${SUPABASE_ANON_KEY}
@@ -34,6 +45,8 @@ supabase:
 cors:
   allowed-origins: ${ALLOWED_ORIGINS:http://localhost:5173,http://localhost:3000}
 security:
+  auth-cache-seconds: ${AUTH_CACHE_SECONDS:30}
+  local-jwt-verification: ${LOCAL_JWT_VERIFICATION:true}
   allow-admin-registration: ${ALLOW_ADMIN_REGISTRATION:false}
   admin-registration-secret: ${ADMIN_REGISTRATION_SECRET:}
   password-reset-redirect: ${PASSWORD_RESET_REDIRECT_URL:}
@@ -44,3 +57,18 @@ logging:
   level:
     org.springframework.web: WARN
     org.springframework.security: WARN
+
+springdoc:
+  api-docs:
+    enabled: ${API_DOCS_ENABLED:false}
+  swagger-ui:
+    enabled: ${API_DOCS_ENABLED:false}
+
+payments:
+  mode: ${PAYMENTS_MODE:disabled}
+  razorpay-key-id: ${RAZORPAY_KEY_ID:}
+  razorpay-key-secret: ${RAZORPAY_KEY_SECRET:}
+  razorpay-webhook-secret: ${RAZORPAY_WEBHOOK_SECRET:}
+  google-credentials-file: ${GOOGLE_PLAY_CREDENTIALS_FILE:}
+  google-package-name: ${GOOGLE_PLAY_PACKAGE_NAME:com.srenglishtak.app}
+  token-encryption-key: ${PAYMENT_TOKEN_ENCRYPTION_KEY:}

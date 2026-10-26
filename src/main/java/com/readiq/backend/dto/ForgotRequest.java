@@ -1,0 +1,19 @@
+package com.readiq.backend.dto;
+
+import com.fasterxml.jackson.annotation.*;
+import java.util.*;
+
+public final class ForgotRequest extends Payload {
+  private String email;
+
+  @JsonProperty("email")
+  public String getEmail() {
+    return email;
+  }
+
+  @JsonProperty("email")
+  public void setEmail(String value) {
+    this.email = value;
+    set("email", value);
+  }
+}
