@@ -51,7 +51,12 @@ public class StorageService {
       byte[] bytes = file.getBytes();
       if (!signature(ext, bytes))
         throw ApiException.bad("File contents do not match the selected file type");
-      boolean document = purpose.equals("book") && (ext.equals(".pdf") || ext.equals(".epub"));
+      // No public-document upload escape hatch. Public uploads are cover/other images only.
+      if ((ext.equals(".pdf") || ext.equals(".epub")) && !purpose.equals("book"))
+        throw ApiException.bad("Documents must be uploaded to private book storage");
+      if (purpose.equals("book") && !ext.equals(".pdf"))
+        throw ApiException.bad("Protected books must be uploaded as PDF");
+      boolean document = purpose.equals("book");
       String bucket = document ? "book-files" : "books";
       if (document) requirePrivateBucket();
       String object = UUID.randomUUID() + ext;

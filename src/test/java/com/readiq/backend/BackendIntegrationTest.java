@@ -46,6 +46,7 @@ class BackendIntegrationTest {
   @Autowired RequestMappingHandlerMapping mappings;
   @MockitoBean SupabaseClient supabase;
   @MockitoBean GooglePlayClient google;
+  @MockitoBean com.readiq.backend.reader.PlayIntegrityClient integrityGoogle;
   @MockitoBean RazorpayClient razorpay;
   @MockitoSpyBean StorageService storage;
   @Autowired PurchaseService purchases;
@@ -72,6 +73,8 @@ class BackendIntegrationTest {
     p.add("payments.razorpay-key-id", () -> "rzp_test_fixture");
     p.add("payments.razorpay-key-secret", () -> "test-secret");
     p.add("payments.razorpay-webhook-secret", () -> "webhook-secret");
+    p.add("reader.cloud-project-number", () -> 123);
+    p.add("reader.certificate-sha256", () -> "ab".repeat(32));
     p.add("springdoc.api-docs.enabled", () -> true);
     p.add("springdoc.swagger-ui.enabled", () -> true);
     p.add("cors.allowed-origins", () -> "https://admin.example.test");
@@ -106,6 +109,7 @@ class BackendIntegrationTest {
             + " policyname='test_old_broad_policy') THEN CREATE POLICY test_old_broad_policy ON"
             + " storage.objects FOR SELECT TO authenticated USING(true); END IF; END $$");
     jdbc.execute(Files.readString(Path.of("db/003_purchases_and_limits.sql")));
+    jdbc.execute(Files.readString(Path.of("db/004_protected_reader.sql")));
   }
 
   @BeforeEach
@@ -598,7 +602,7 @@ class BackendIntegrationTest {
     String token = "google-test-purchase-token";
     mvc.perform(get("/api/books")).andExpect(jsonPath("$[0].file_url").isEmpty());
     mvc.perform(request(get("/api/books/" + id + "/stream"), "user"))
-        .andExpect(status().isPaymentRequired());
+        .andExpect(status().isGone());
     mvc.perform(request(get("/api/books/" + id + "/access"), "other"))
         .andExpect(jsonPath("$.has_access").value(false));
     when(google.purchase(token)).thenReturn(googleReceipt(USER));
@@ -763,6 +767,161 @@ class BackendIntegrationTest {
             secret.getBytes(java.nio.charset.StandardCharsets.UTF_8), "HmacSHA256"));
     return java.util.HexFormat.of()
         .formatHex(mac.doFinal(value.getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+  }
+
+  private record ReaderTestSession(String book, java.security.KeyPair key, JsonNode session) {}
+
+  private String readerSign(java.security.KeyPair key, String message) throws Exception {
+    var signer = java.security.Signature.getInstance("SHA256withECDSA");
+    signer.initSign(key.getPrivate());
+    signer.update(message.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+    return Base64.getEncoder().encodeToString(signer.sign());
+  }
+
+  private ReaderTestSession openReader(String book, String account) throws Exception {
+    var generator = java.security.KeyPairGenerator.getInstance("EC");
+    generator.initialize(new java.security.spec.ECGenParameterSpec("secp256r1"));
+    var key = generator.generateKeyPair();
+    var challenge = postJson("/api/books/" + book + "/reader/challenge", account,
+        map("public_key", Base64.getEncoder().encodeToString(key.getPublic().getEncoded())), 200);
+    String hash = challenge.path("request_hash").asText();
+    var verdict = json.valueToTree(map(
+        "requestDetails", map("requestPackageName", "com.srenglishtak.app", "requestHash", hash,
+            "timestampMillis", Instant.now().toEpochMilli()),
+        "appIntegrity", map("appRecognitionVerdict", "PLAY_RECOGNIZED", "packageName", "com.srenglishtak.app",
+            "versionCode", "10", "certificateSha256Digest", List.of(Base64.getUrlEncoder().withoutPadding()
+                .encodeToString(java.util.HexFormat.of().parseHex("ab".repeat(32))))),
+        "accountDetails", map("appLicensingVerdict", "LICENSED"),
+        "deviceIntegrity", map("deviceRecognitionVerdict", List.of("MEETS_DEVICE_INTEGRITY")),
+        "environmentDetails", map("appAccessRiskVerdict", map("appsDetected", List.of("KNOWN_INSTALLED")))));
+    String token = "opaque-fixture-" + UUID.randomUUID();
+    when(integrityGoogle.decode(token)).thenReturn(verdict);
+    var body = map("challenge_id", challenge.path("challenge_id").asText(), "integrity_token", token,
+        "signature", readerSign(key, "activate\n" + challenge.path("challenge_id").asText() + "\n" + hash));
+    var session = postJson("/api/books/" + book + "/reader/sessions", account, body, 200);
+    // Reusing a valid, consumed challenge never opens a second reader session.
+    postJson("/api/books/" + book + "/reader/sessions", account, body, 403);
+    return new ReaderTestSession(book, key, session);
+  }
+
+  private Map<String, Object> readerProof(ReaderTestSession r, String action, int page, long timestamp) throws Exception {
+    UUID nonce = UUID.randomUUID();
+    String proof = com.readiq.backend.reader.ReaderCrypto.proof(action, UUID.fromString(r.book()),
+        UUID.fromString(r.session().path("session_id").asText()), page, timestamp, nonce);
+    return map("timestamp", timestamp, "nonce", nonce, "signature", readerSign(r.key(), proof));
+  }
+
+  private String pagePath(ReaderTestSession r, int page) {
+    return "/api/books/" + r.book() + "/reader/sessions/" + r.session().path("session_id").asText() + "/pages/" + page;
+  }
+
+  private void readerPdfFixture() throws Exception {
+    byte[] bytes;
+    try (var pdf = new org.apache.pdfbox.pdmodel.PDDocument(); var out = new java.io.ByteArrayOutputStream()) {
+      pdf.addPage(new org.apache.pdfbox.pdmodel.PDPage());
+      pdf.addPage(new org.apache.pdfbox.pdmodel.PDPage());
+      pdf.save(out);
+      bytes = out.toByteArray();
+    }
+    doAnswer(call -> new java.io.ByteArrayInputStream(bytes)).when(storage).download(anyString());
+  }
+
+  @Test
+  void protectedReaderRejectsCopiedUrlsKeysProofsAndOriginalDownloadsEvenForBuyers() throws Exception {
+    readerPdfFixture();
+    String id = paidBook().path("id").asText();
+    for (String account : List.of("user", "other", "admin")) {
+      mvc.perform(request(get("/api/books/" + id + "/stream").header("Range", "bytes=0-100"), account))
+          .andExpect(status().isGone());
+    }
+    mvc.perform(get("/api/books/" + id + "/stream")).andExpect(status().isUnauthorized());
+    var gen = java.security.KeyPairGenerator.getInstance("EC");
+    gen.initialize(new java.security.spec.ECGenParameterSpec("secp256r1"));
+    String key = Base64.getEncoder().encodeToString(gen.generateKeyPair().getPublic().getEncoded());
+    postJson("/api/books/" + id + "/reader/challenge", "user", map("public_key", key), 402);
+    when(google.purchase("reader-purchase-token")).thenReturn(googleReceipt(USER));
+    postJson("/api/payments/google/verify", "user", map("book_id", id, "purchase_token", "reader-purchase-token"), 200);
+    // The raw route stays closed after a valid purchase too.
+    mvc.perform(request(get("/api/books/" + id + "/stream"), "user")).andExpect(status().isGone());
+    var r = openReader(id, "user");
+    assertEquals(2, r.session().path("page_count").asInt());
+    var proof = readerProof(r, "page", 1, Instant.now().getEpochSecond());
+    mvc.perform(request(get(pagePath(r, 1)), "user")).andExpect(status().isMethodNotAllowed());
+    postJson(pagePath(r, 1), null, proof, 401);
+    postJson(pagePath(r, 1), "other", proof, 402);
+    var copied = new LinkedHashMap<>(proof);
+    copied.put("signature", "not-a-device-signature");
+    postJson(pagePath(r, 1), "user", copied, 403);
+    // Changing the page number invalidates a copied valid signature.
+    postJson(pagePath(r, 2), "user", proof, 403);
+    var result = mvc.perform(request(post(pagePath(r, 1)), "user").contentType("application/json")
+        .content(json.writeValueAsString(proof))).andExpect(status().isOk())
+        .andExpect(content().contentType("image/jpeg"))
+        .andExpect(header().string("Cache-Control", "private, no-store, max-age=0")).andReturn();
+    byte[] image = result.getResponse().getContentAsByteArray();
+    assertEquals((byte)0xff, image[0]);
+    assertNotNull(javax.imageio.ImageIO.read(new java.io.ByteArrayInputStream(image)));
+    postJson(pagePath(r, 1), "user", proof, 403); // exact replay
+    postJson(pagePath(r, 1), "user", readerProof(r, "page", 1, Instant.now().minusSeconds(60).getEpochSecond()), 403);
+    jdbc.update("update book_purchases set status='revoked' where user_id=?", USER);
+    postJson(pagePath(r, 1), "user", readerProof(r, "page", 1, Instant.now().getEpochSecond()), 402);
+  }
+
+  @Test
+  void freeBooksAlsoUsePrivateWatermarkedPagesAndSessionsAreAccountBoundAndRevocable() throws Exception {
+    readerPdfFixture();
+    String id = book(true).path("id").asText();
+    jdbc.update("update books set file_url=? where id=?",
+        "http://127.0.0.1:9/storage/v1/object/authenticated/book-files/free.pdf", UUID.fromString(id));
+    var first = openReader(id, "user");
+    var proof = readerProof(first, "page", 1, Instant.now().getEpochSecond());
+    postJson(pagePath(first, 1), "other", proof, 403);
+    var next = openReader(id, "user");
+    postJson(pagePath(first, 1), "user", proof, 403); // account's previous session revoked
+    var userPage = mvc.perform(request(post(pagePath(next, 1)), "user").contentType("application/json")
+        .content(json.writeValueAsString(readerProof(next, "page", 1, Instant.now().getEpochSecond()))))
+        .andExpect(status().isOk()).andReturn().getResponse().getContentAsByteArray();
+    var other = openReader(id, "other");
+    var otherPage = mvc.perform(request(post(pagePath(other, 1)), "other").contentType("application/json")
+        .content(json.writeValueAsString(readerProof(other, "page", 1, Instant.now().getEpochSecond()))))
+        .andExpect(status().isOk()).andReturn().getResponse().getContentAsByteArray();
+    assertFalse(Arrays.equals(userPage, otherPage), "Server watermark must be bound to the reader");
+    String close = "/api/books/" + id + "/reader/sessions/" + next.session().path("session_id").asText() + "/close";
+    postJson(close, "user", readerProof(next, "close", 0, Instant.now().getEpochSecond()), 200);
+    postJson(pagePath(next, 1), "user", readerProof(next, "page", 1, Instant.now().getEpochSecond()), 403);
+    jdbc.update("update reader_sessions set expires_at=now()-interval '1 second'");
+    postJson(pagePath(other, 1), "other", readerProof(other, "page", 1, Instant.now().getEpochSecond()), 403);
+    for (String table : List.of("reader_challenges", "reader_sessions", "reader_request_nonces")) {
+      assertFalse(jdbc.queryForObject("select has_table_privilege('authenticated',?,'SELECT')", Boolean.class, table));
+      assertFalse(jdbc.queryForObject("select has_table_privilege('anon',?,'SELECT')", Boolean.class, table));
+    }
+  }
+
+  @Test
+  void bookCatalogCannotPublishPublicOriginalsOrEpubsAndUploadsCannotBypassPrivacy() throws Exception {
+    postJson("/api/books", "admin", map("title", "Public free PDF", "format_type", "pdf", "file_url",
+        "http://127.0.0.1:9/storage/v1/object/public/books/leak.pdf"), 400);
+    postJson("/api/books", "admin", map("title", "Raw EPUB", "format_type", "epub"), 400);
+    var file = new MockMultipartFile("file", "book.pdf", "application/pdf", "%PDF-1.7\nfixture".getBytes());
+    mvc.perform(multipart("/api/upload").file(file).param("purpose", "public")
+        .header("Authorization", "Bearer admin")).andExpect(status().isBadRequest());
+  }
+
+  @Test
+  void failedIntegrityConsumesItsChallengeAndCannotBeReplayedToSpendGoogleQuota() throws Exception {
+    String id = book(true).path("id").asText();
+    var generator = java.security.KeyPairGenerator.getInstance("EC");
+    generator.initialize(new java.security.spec.ECGenParameterSpec("secp256r1"));
+    var key = generator.generateKeyPair();
+    var challenge = postJson("/api/books/" + id + "/reader/challenge", "user",
+        map("public_key", Base64.getEncoder().encodeToString(key.getPublic().getEncoded())), 200);
+    when(integrityGoogle.decode("invalid-attestation")).thenThrow(new ApiException(403, "Invalid attestation"));
+    var body = map("challenge_id", challenge.path("challenge_id").asText(), "integrity_token", "invalid-attestation",
+        "signature", readerSign(key, "activate\n" + challenge.path("challenge_id").asText() + "\n" + challenge.path("request_hash").asText()));
+    postJson("/api/books/" + id + "/reader/sessions", "user", body, 403);
+    postJson("/api/books/" + id + "/reader/sessions", "user", body, 403);
+    verify(integrityGoogle, times(1)).decode("invalid-attestation");
+    assertEquals(0, jdbc.queryForObject("select count(*) from reader_sessions", Integer.class));
   }
 
   @Test

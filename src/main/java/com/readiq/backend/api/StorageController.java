@@ -8,7 +8,6 @@ import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
-import org.springframework.web.servlet.mvc.method.annotation.StreamingResponseBody;
 
 @RestController
 public class StorageController {
@@ -33,36 +32,11 @@ public class StorageController {
     return Map.of("url", storage.upload(file, purpose));
   }
 
+  // Retired for every caller, including purchasers and admins. Never add a raw-file fallback.
   @GetMapping("/api/books/{id}/stream")
-  public ResponseEntity<StreamingResponseBody> stream(@PathVariable UUID id, Authentication a) {
-    var principal = ApiPrincipal.from(a);
-    purchases.requireAccess(principal.id(), id, principal.admin());
-    // The actual storage URL never leaves the server for ordinary clients.
-    var b = catalog.book(id, true);
-    if (((Number) b.getOrDefault("price_paise", 0)).intValue() > 0) {
-      if (!storage.privateFile(Objects.toString(b.get("file_url"), null)))
-        throw new ApiException(503, "Paid book storage is not private");
-      storage.requirePrivateBucket();
-    }
-    if (b.get("file_url") == null) throw ApiException.missing();
-    String type = "epub".equals(b.get("format_type")) ? "application/epub+zip" : "application/pdf";
-    var input = storage.download(b.get("file_url").toString());
-    return ResponseEntity.ok()
-        .contentType(MediaType.parseMediaType(type))
-        .header("Cache-Control", "private, no-store")
-        .header("X-Content-Type-Options", "nosniff")
-        .header(
-            "Content-Disposition",
-            "inline; filename=\"book_"
-                + id
-                + ("application/pdf".equals(type) ? ".pdf" : ".epub")
-                + "\"")
-        .body(
-            output -> {
-              try (input) {
-                input.transferTo(output);
-              }
-            });
+  public ResponseEntity<?> stream(@PathVariable UUID id, Authentication a) {
+    return ResponseEntity.status(410).header("Cache-Control", "private, no-store")
+        .body(Map.of("error", "Original book downloads are disabled. Update the app to use the protected reader"));
   }
 
   @GetMapping({"/", "/health"})

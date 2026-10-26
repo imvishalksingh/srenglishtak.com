@@ -72,3 +72,11 @@ payments:
   google-credentials-file: ${GOOGLE_PLAY_CREDENTIALS_FILE:}
   google-package-name: ${GOOGLE_PLAY_PACKAGE_NAME:com.srenglishtak.app}
   token-encryption-key: ${PAYMENT_TOKEN_ENCRYPTION_KEY:}
+
+# There is deliberately no bypass mode for protected reading.
+reader:
+  cloud-project-number: ${PLAY_INTEGRITY_CLOUD_PROJECT_NUMBER:0}
+  credentials-file: ${PLAY_INTEGRITY_CREDENTIALS_FILE:${payments.google-credentials-file:}}
+  package-name: ${GOOGLE_PLAY_PACKAGE_NAME:com.srenglishtak.app}
+  certificate-sha256: ${PLAY_INTEGRITY_CERTIFICATE_SHA256:}
+  minimum-version-code: ${READER_MINIMUM_VERSION_CODE:10}

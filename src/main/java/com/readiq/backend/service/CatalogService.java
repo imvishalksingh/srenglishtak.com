@@ -108,11 +108,14 @@ public class CatalogService {
         throw ApiException.bad("Only INR is supported");
       Object price = values.getOrDefault("price_paise", previous.getOrDefault("price_paise", 0));
       int amount = integer(price, "price_paise", 0, 1000000);
-      if (amount > 0) {
+      if (!"pdf".equals(Objects.toString(values.getOrDefault("format_type", previous.getOrDefault("format_type", "pdf")))))
+        throw ApiException.bad("Protected books require a PDF edition");
+      String selectedFile = Objects.toString(values.getOrDefault("file_url", previous.get("file_url")), "");
+      if (!selectedFile.isBlank() || amount > 0) {
         String file =
             Objects.toString(values.getOrDefault("file_url", previous.get("file_url")), "");
         if (!storage.privateFile(file))
-          throw ApiException.bad("Paid books require a PDF/EPUB uploaded to private book storage");
+          throw ApiException.bad("All books require a PDF uploaded to private book storage");
         storage.requirePrivateBucket();
         storage.requirePrivateFile(file);
         if (id != null)

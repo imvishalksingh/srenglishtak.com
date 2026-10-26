@@ -5,6 +5,9 @@ COPY src src
 RUN mvn -B -ntp -DskipTests package
 FROM eclipse-temurin:21-jre
 WORKDIR /app
+RUN apt-get update && apt-get install -y --no-install-recommends fontconfig fonts-dejavu-core \
+    && rm -rf /var/lib/apt/lists/*
+ENV JAVA_TOOL_OPTIONS="-Djava.awt.headless=true"
 RUN groupadd --system readiq \
     && (getent group 1000 >/dev/null || groupadd --gid 1000 render-secrets) \
     && useradd --system --gid readiq --groups 1000 readiq
