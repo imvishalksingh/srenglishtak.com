@@ -2,7 +2,7 @@
 
 Current scope: one-time purchases for each book on Android (Google Play) and the website (Razorpay). iOS purchasing is deliberately disabled for a later integration. The Node backend is not used.
 
-Code and local automated tests do not configure payment accounts or prove real provider connectivity. A Google service-account file has now been supplied and validated with OAuth, but its project still reports Android Publisher SERVICE_DISABLED. A Razorpay account/test key pair has not been supplied. Checkout stays unavailable until the corresponding provider is configured. Never substitute a fake payment-success response in the deployed service.
+Code and local automated tests do not configure payment accounts or prove real provider connectivity. A Google service-account file has been supplied and validated with OAuth. After the user enabled Android Publisher on 27 October 2026, a read-only product-catalog check returned HTTP 200. A Razorpay account/test key pair has not been supplied. Checkout stays unavailable until the corresponding provider is configured. Never substitute a fake payment-success response in the deployed service.
 
 ## 1. Database and private book storage
 
@@ -25,6 +25,21 @@ Existing books keep price 0 until an admin changes them. To sell a previously pu
 5. Generate a random 32-byte key, encode it as base64, and set `PAYMENT_TOKEN_ENCRYPTION_KEY`. For example, generate it privately on the server with `openssl rand -base64 32`. Keep this key stable and backed up: existing encrypted purchase tokens cannot be reconciled if it is lost or replaced without re-encryption.
 
 The backend uses Google's credential library to obtain Android Publisher OAuth access. It verifies ProductPurchaseV2 with Google, requiring PURCHASED state, the correct product, quantity 1, no refund, no rental/preorder, the configured environment and the app-account binding. It acknowledges non-consumable purchases without consuming them. Google tokens are encrypted with AES-GCM; the database stores a SHA-256 identity for deduplication.
+
+## Render activation for Android test purchases
+
+The app message `Book purchases are not configured yet` means `/api/payments/context` returned `android_enabled: false`. This requires a non-disabled payment mode, the Google credentials file path, and the token encryption key. Setting these enables checkout; Google API access, Play permissions and product activation must also pass before verification works.
+
+1. Enable [Google Play Android Developer API in project srenglishtak](https://console.cloud.google.com/apis/library/androidpublisher.googleapis.com?project=srenglishtak). The initial credential check returned `403 SERVICE_DISABLED`. After enablement on 27 October 2026, the catalog request returns HTTP 200. This confirms catalog access; an actual purchase-verification request is still required to validate the full billing flow.
+2. Grant the service-account email access to `com.srenglishtak.app` in Play Console, with the two billing/order permissions listed above. Read the email locally from the supplied JSON file; never upload the private key to Play Console.
+3. Render service **Environment > Secret Files**: add filename `google-play-service-account.json`, with the contents of the ignored local `secrets/google-play-service-account.json`. Render mounts it at `/etc/secrets/google-play-service-account.json`.
+4. The ignored local `secrets/render-google-play-test.env` contains only the four Android test settings, including the existing local encryption key. Import its declarations into the intended test service. If Render already has an encryption key, preserve that existing value. Do not import the entire local `.env`: its blank local DB values must not overwrite production DB configuration. Keep this file and the JSON out of Git and chat.
+5. Deploy the updated Dockerfile. Its non-root app user also belongs to group `1000`, as Render requires for runtime secret-file access. Never copy the JSON into the image.
+6. Add the phone's purchasing Google account as a Play Console **license tester**, and confirm the mapped one-time product and its purchase option are active. The installed debug APK can use Play test billing for a license tester with the matching package name. Complete purchase, restart/restore, and refund tests with Google's test payment instruments before live activation.
+
+Expected context after configuration: `environment: test`, `android_enabled: true`. Razorpay remains disabled until its real test keys and webhook secret are supplied. The Play catalog contains `book_english_grammar_01`, with an ACTIVE buy option, legacy compatibility and India availability. The paid book in the live app catalog currently maps to `book_english_grammer_01` (spelling mismatch). Correct the book product ID in the admin dashboard to `book_english_grammar_01` before attempting checkout. Do not remap a book with recorded purchases; review purchase history first.
+
+References: [Render runtime secret files](https://render.com/docs/docker-secrets#accessing-secret-files-at-runtime), [Render environment settings](https://render.com/docs/configure-environment-variables), [Google Play API setup](https://developers.google.com/android-publisher/getting_started), [Google Play license testing](https://developer.android.com/google/play/billing/test).
 
 ## 3. Configure each book in Play Console and the admin dashboard
 

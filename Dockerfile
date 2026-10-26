@@ -5,7 +5,9 @@ COPY src src
 RUN mvn -B -ntp -DskipTests package
 FROM eclipse-temurin:21-jre
 WORKDIR /app
-RUN groupadd --system readiq && useradd --system --gid readiq readiq
+RUN groupadd --system readiq \
+    && (getent group 1000 >/dev/null || groupadd --gid 1000 render-secrets) \
+    && useradd --system --gid readiq --groups 1000 readiq
 COPY --from=build /app/target/backend-1.0.0.jar /app/backend.jar
 USER readiq
 EXPOSE 8080
