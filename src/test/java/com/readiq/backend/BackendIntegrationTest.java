@@ -934,6 +934,7 @@ class BackendIntegrationTest {
     postJson(pagePath(r, 1), "user", readerProof(r, "page", 1, Instant.now().minusSeconds(60).getEpochSecond()), 403);
     jdbc.update("update book_purchases set status='revoked' where user_id=?", USER);
     postJson(pagePath(r, 1), "user", readerProof(r, "page", 1, Instant.now().getEpochSecond()), 402);
+    verify(storage,times(1)).download(anyString()); // Count + page reuse RAM; revocation still wins over cache.
   }
 
   @Test
@@ -955,6 +956,7 @@ class BackendIntegrationTest {
         .content(json.writeValueAsString(readerProof(other, "page", 1, Instant.now().getEpochSecond()))))
         .andExpect(status().isOk()).andReturn().getResponse().getContentAsByteArray();
     assertFalse(Arrays.equals(userPage, otherPage), "Server watermark must be bound to the reader");
+    verify(storage,times(1)).download(anyString()); // Shared base raster never shares ownership marks.
     String close = "/api/books/" + id + "/reader/sessions/" + next.session().path("session_id").asText() + "/close";
     postJson(close, "user", readerProof(next, "close", 0, Instant.now().getEpochSecond()), 200);
     postJson(pagePath(next, 1), "user", readerProof(next, "page", 1, Instant.now().getEpochSecond()), 403);
