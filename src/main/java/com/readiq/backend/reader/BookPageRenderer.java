@@ -25,8 +25,8 @@ import org.springframework.stereotype.Service;
 public class BookPageRenderer {
   private static final int MAX_BYTES = 50 * 1024 * 1024;
   private static final long PAGE_MEMORY = 16L * 1024 * 1024;
-  private static final long IDLE_NANOS = java.time.Duration.ofMinutes(2).toNanos();
-  private static final long LIFE_NANOS = java.time.Duration.ofMinutes(5).toNanos();
+  private static final long IDLE_NANOS = java.time.Duration.ofMinutes(10).toNanos();
+  private static final long LIFE_NANOS = java.time.Duration.ofMinutes(30).toNanos();
   private final StorageService storage;
   private final LongSupplier clock;
   // PDFBox documents are not thread-safe. Keep bounded rendering on small production instances.
@@ -56,7 +56,7 @@ public class BookPageRenderer {
   public BookPageRenderer(StorageService storage) { this(storage, System::nanoTime); }
   BookPageRenderer(StorageService storage, LongSupplier clock) { this.storage = storage; this.clock = clock; }
 
-  private CachedBook open(Map<String, Object> book) throws IOException {
+  private CachedBook open(Map<String, Object> book, boolean verifiedStorage) throws IOException {
     if (!"pdf".equals(book.get("format_type")))
       throw new ApiException(422, "This book needs a protected PDF edition. Contact support");
     String url = Objects.toString(book.get("file_url"), "");
@@ -65,7 +65,7 @@ public class BookPageRenderer {
       throw new ApiException(503, "This book must be moved to private storage before reading");
     }
     // Even a cache hit must fail closed if storage privacy is no longer configured.
-    try { storage.requirePrivateBucket(); }
+    try { if (!verifiedStorage) storage.requirePrivateBucket(); }
     catch (RuntimeException failure) { clear(); throw failure; }
     long now = clock.getAsLong();
     var source = new Source(Objects.toString(book.get("id"), ""), url);
@@ -89,17 +89,25 @@ public class BookPageRenderer {
     }
   }
 
-  public int pageCount(Map<String, Object> book) {
+  int pageCount(ReaderBookAccess.AuthorizedBook book) { return count(book.metadata(),true); }
+  public int pageCount(Map<String, Object> book) { return count(book,false); }
+  private int count(Map<String, Object> book, boolean verifiedStorage) {
     acquire();
-    try { return open(book).pdf.getNumberOfPages(); }
+    try { return open(book,verifiedStorage).pdf.getNumberOfPages(); }
     catch (IOException ex) { clear(); throw new ApiException(422, "Book PDF could not be opened"); }
     finally { capacity.release(); }
   }
 
+  byte[] render(ReaderBookAccess.AuthorizedBook book, int page, UUID user, UUID session) {
+    return render(book.metadata(),page,user,session,true);
+  }
   public byte[] render(Map<String, Object> book, int page, UUID user, UUID session) {
+    return render(book,page,user,session,false);
+  }
+  private byte[] render(Map<String, Object> book, int page, UUID user, UUID session, boolean verifiedStorage) {
     acquire();
     try {
-      var document = open(book);
+      var document = open(book,verifiedStorage);
       if (page < 1 || page > document.pdf.getNumberOfPages()) throw ApiException.missing();
       BufferedImage base = document.pages.get(page);
       if (base == null) {

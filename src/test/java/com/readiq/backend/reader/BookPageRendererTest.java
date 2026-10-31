@@ -78,8 +78,8 @@ class BookPageRendererTest {
     verify(storage,times(3)).download(anyString());
   }
   @Test void idleExpiryAndHardLifetimeReleaseCachedDocument() {
-    page(1); clock.addAndGet(Duration.ofMinutes(2).toNanos()); renderer.expireCache(); page(1);
-    for (int i=0; i<5; i++) { clock.addAndGet(Duration.ofMinutes(1).toNanos()); page(1); }
+    page(1); clock.addAndGet(Duration.ofMinutes(10).toNanos()); renderer.expireCache(); page(1);
+    for (int i=0; i<6; i++) { clock.addAndGet(Duration.ofMinutes(5).toNanos()); page(1); }
     verify(storage,times(3)).download(anyString());
   }
   @Test void morePagesEvictOldRastersWithinMemoryBudget() throws Exception {

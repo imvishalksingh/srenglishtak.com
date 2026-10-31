@@ -146,6 +146,7 @@ class BackendIntegrationTest {
 
   @BeforeEach
   void data() {
+    jdbc.update("insert into storage.buckets(id,name,public) values('book-files','book-files',false) on conflict(id) do update set public=false");
     doNothing().when(storage).requirePrivateBucket();
     doNothing().when(storage).requirePrivateFile(anyString());
     jdbc.execute("truncate api_rate_limits,revoked_access_tokens,purchase_revocations");
@@ -847,7 +848,8 @@ class BackendIntegrationTest {
     return Base64.getEncoder().encodeToString(signer.sign());
   }
 
-  private ReaderTestSession openReader(String book, String account) throws Exception {
+  private ReaderTestSession openReader(String book, String account) throws Exception { return openReader(book,account,null); }
+  private ReaderTestSession openReader(String book, String account, Integer initialPage) throws Exception {
     var generator = java.security.KeyPairGenerator.getInstance("EC");
     generator.initialize(new java.security.spec.ECGenParameterSpec("secp256r1"));
     var key = generator.generateKeyPair();
@@ -866,7 +868,12 @@ class BackendIntegrationTest {
     String token = "opaque-fixture-" + UUID.randomUUID();
     when(integrityGoogle.decode(token)).thenReturn(verdict);
     var body = map("challenge_id", challenge.path("challenge_id").asText(), "integrity_token", token,
-        "signature", readerSign(key, "activate\n" + challenge.path("challenge_id").asText() + "\n" + hash));
+        "signature", readerSign(key, "activate\n" + challenge.path("challenge_id").asText() + "\n" + hash + (initialPage==null ? "" : "\npage\n"+initialPage)));
+    if(initialPage!=null) {
+      body.put("initial_page",initialPage);
+      var changed=new LinkedHashMap<>(body);changed.put("initial_page", initialPage==1 ? 2 : 1);
+      postJson("/api/books/"+book+"/reader/sessions",account,changed,403);
+    }
     var session = postJson("/api/books/" + book + "/reader/sessions", account, body, 200);
     // Reusing a valid, consumed challenge never opens a second reader session.
     postJson("/api/books/" + book + "/reader/sessions", account, body, 403);
@@ -893,6 +900,26 @@ class BackendIntegrationTest {
       bytes = out.toByteArray();
     }
     doAnswer(call -> new java.io.ByteArrayInputStream(bytes)).when(storage).download(anyString());
+  }
+
+  @Test void inlineFirstPageIsPersonalizedAndWarmPagesCheckStoragePrivacyWithoutHttp() throws Exception {
+    readerPdfFixture(); String id=book(true).path("id").asText();
+    jdbc.update("update books set file_url=? where id=?","http://127.0.0.1:9/storage/v1/object/authenticated/book-files/inline.pdf",UUID.fromString(id));
+    clearInvocations(storage);
+    var session=openReader(id,"user",2);
+    assertEquals(2,session.session().path("initial_page").asInt());
+    byte[] initial=Base64.getDecoder().decode(session.session().path("initial_image").asText());
+    assertNotNull(javax.imageio.ImageIO.read(new java.io.ByteArrayInputStream(initial)));
+    verify(storage,times(1)).download(anyString()); verify(storage,never()).requirePrivateBucket();
+    mvc.perform(request(post(pagePath(session,1)),"user").contentType("application/json")
+        .content(json.writeValueAsString(readerProof(session,"page",1,Instant.now().getEpochSecond()))))
+        .andExpect(status().isOk()).andExpect(header().exists("Server-Timing"));
+    assertEquals(2,jdbc.queryForObject("select used from api_rate_limits where bucket_key=?",Integer.class,
+        com.readiq.backend.auth.AccessTokenVerifier.hash("reader:page:"+USER)));
+    jdbc.update("update storage.buckets set public=true where id='book-files'");
+    postJson(pagePath(session,1),"user",readerProof(session,"page",1,Instant.now().getEpochSecond()),503);
+    verify(storage,times(1)).download(anyString());
+    mvc.perform(request(get("/api/books/"+id+"/stream"),"user")).andExpect(status().isGone());
   }
 
   @Test
