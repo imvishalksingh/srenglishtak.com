@@ -30,12 +30,16 @@ public class BookPageRenderer {
   private final StorageService storage;
   private final LongSupplier clock;
   // PDFBox documents are not thread-safe. Keep bounded rendering on small production instances.
-  private final Semaphore capacity = new Semaphore(1);
+  private final Semaphore capacity = new Semaphore(1,true);
+  private final java.util.concurrent.atomic.AtomicInteger foregroundWaiting = new java.util.concurrent.atomic.AtomicInteger();
+  private final java.time.Duration waitLimit;
+  private final PreparedReaderPages prepared;
+  private long documentEpoch;
   private static final int MAX_DOCUMENTS = 4;
   private static final long SOURCE_MEMORY = 64L * 1024 * 1024;
   private final LinkedHashMap<Source,CachedBook> documents = new LinkedHashMap<>(4,.75f,true);
   private record PageKey(Source source, int number) {}
-  private final LinkedHashMap<PageKey,BufferedImage> pages = new LinkedHashMap<>(8,.75f,true);
+  private final LinkedHashMap<PageKey,CompressedReaderRaster> pages = new LinkedHashMap<>(8,.75f,true);
   private long originalBytes, pageBytes;
 
   private record Source(String id, String location) {}
@@ -54,9 +58,21 @@ public class BookPageRenderer {
     }
   }
 
+  public BookPageRenderer(StorageService storage) {
+    this(storage,System::nanoTime,java.time.Duration.ofSeconds(8),true);
+  }
   @Autowired
-  public BookPageRenderer(StorageService storage) { this(storage, System::nanoTime); }
-  BookPageRenderer(StorageService storage, LongSupplier clock) { this.storage = storage; this.clock = clock; }
+  public BookPageRenderer(StorageService storage,
+      @org.springframework.beans.factory.annotation.Value("${reader.prepare-next-page:true}") boolean readAhead) {
+    this(storage,System::nanoTime,java.time.Duration.ofSeconds(8),readAhead);
+  }
+  BookPageRenderer(StorageService storage, LongSupplier clock) {
+    this(storage,clock,java.time.Duration.ofMillis(150),false);
+  }
+  BookPageRenderer(StorageService storage, LongSupplier clock, java.time.Duration wait, boolean readAhead) {
+    this.storage=storage;this.clock=clock;this.waitLimit=wait;
+    this.prepared=new PreparedReaderPages(this::renderUncached,clock,wait,readAhead);
+  }
 
   private CachedBook open(Map<String, Object> book, boolean verifiedStorage) throws IOException {
     if (!"pdf".equals(book.get("format_type")))
@@ -69,6 +85,7 @@ public class BookPageRenderer {
     // Even a cache hit must fail closed if storage privacy is no longer configured.
     try { if (!verifiedStorage) storage.requirePrivateBucket(); }
     catch (RuntimeException failure) { clear(); throw failure; }
+    if(documentEpoch!=prepared.epoch()) { clear();documentEpoch=prepared.epoch(); }
     long now = clock.getAsLong();
     var source = new Source(Objects.toString(book.get("id"), ""), url);
     var old = documents.values().iterator();
@@ -119,20 +136,38 @@ public class BookPageRenderer {
     return render(book,page,user,session,false);
   }
   private byte[] render(Map<String, Object> book, int page, UUID user, UUID session, boolean verifiedStorage) {
-    acquire();
+    if(page<1 || page>2000) throw ApiException.missing();
+    // Authorization is fresh in ReaderBookAccess BEFORE this method, even on prepared-image hits.
     try {
-      var document = open(book,verifiedStorage);
+      if(!"pdf".equals(book.get("format_type")))
+        throw new ApiException(422,"This book needs a protected PDF edition. Contact support");
+      if(!storage.privateFile(Objects.toString(book.get("file_url"),"")))
+        throw new ApiException(503,"This book must be moved to private storage before reading");
+      if(!verifiedStorage) storage.requirePrivateBucket();
+    } catch(RuntimeException failure) { prepared.invalidate();throw failure; }
+    return prepared.render(book,page,user,session);
+  }
+  private PreparedReaderPages.Page renderUncached(Map<String,Object> book, int page, UUID user, UUID session, boolean background) {
+    if(background) {
+      if(foregroundWaiting.get()>0 || !capacity.tryAcquire())
+        throw new ApiException(503,"Reader is busy. Please try again shortly");
+    } else acquire();
+    try {
+      var document = open(book,true);
       if (page < 1 || page > document.pdf.getNumberOfPages()) throw ApiException.missing();
       var pageKey = new PageKey(document.source,page);
-      BufferedImage base = pages.get(pageKey);
-      if (base == null) {
-        base = rasterize(document.pdf, page);
-        long bytes = memory(base);
-        var iterator = pages.values().iterator();
-        while (pageBytes + bytes > PAGE_MEMORY && iterator.hasNext()) {
-          var old = iterator.next(); pageBytes -= memory(old); old.flush(); iterator.remove();
+      var saved=pages.get(pageKey);
+      BufferedImage base=saved==null ? rasterize(document.pdf,page) : saved.unpack();
+      try {
+      if(saved==null) {
+        saved=CompressedReaderRaster.pack(base);
+        long bytes=saved.bytes();
+        var iterator=pages.values().iterator();
+        while(pageBytes+bytes>PAGE_MEMORY && iterator.hasNext()) {
+          var old=iterator.next();pageBytes-=old.bytes();old.clear();iterator.remove();
         }
-        pages.put(pageKey, base); pageBytes += bytes;
+        if(bytes<=PAGE_MEMORY) {pages.put(pageKey,saved);pageBytes+=bytes;}
+        else saved.clear();
       }
       int footer = footerSize(base.getWidth()) * 3;
       var image = new BufferedImage(base.getWidth(), base.getHeight() + footer, BufferedImage.TYPE_INT_RGB);
@@ -150,10 +185,11 @@ public class BookPageRenderer {
           var writer = writers.next();
           try (var pixels = new MemoryCacheImageOutputStream(output)) {
             writer.setOutput(pixels); writer.write(image); pixels.flush();
-            return output.toByteArray();
+            return new PreparedReaderPages.Page(output.toByteArray(),document.pdf.getNumberOfPages());
           } finally { writer.dispose(); }
         }
       } finally { image.flush(); }
+      } finally {base.flush();}
     } catch (IOException ex) { clear(); throw new ApiException(422, "Book page could not be rendered"); }
     finally { capacity.release(); }
   }
@@ -170,19 +206,25 @@ public class BookPageRenderer {
     return renderer.renderImage(page - 1, scale, ImageType.RGB);
   }
 
-  private static long memory(BufferedImage image) { return (long) image.getWidth() * image.getHeight() * 4; }
   private static boolean expired(CachedBook book, long now) {
     return now - book.used >= IDLE_NANOS || now - book.created >= LIFE_NANOS;
   }
   private void acquire() {
-    if (!capacity.tryAcquire()) throw new ApiException(503, "Reader is busy. Please try again shortly");
+    foregroundWaiting.incrementAndGet();
+    try {
+      if(!capacity.tryAcquire(waitLimit.toMillis(),java.util.concurrent.TimeUnit.MILLISECONDS))
+        throw new ApiException(503,"Reader is busy. Please try again shortly");
+    } catch(InterruptedException ex) {
+      Thread.currentThread().interrupt();throw new ApiException(503,"Reader is busy. Please try again shortly");
+    } finally {foregroundWaiting.decrementAndGet();}
   }
   private void release(CachedBook document) {
+    prepared.drop(document.source.id,document.source.location);
     var iterator = pages.entrySet().iterator();
     while (iterator.hasNext()) {
       var entry = iterator.next();
       if (entry.getKey().source.equals(document.source)) {
-        pageBytes -= memory(entry.getValue()); entry.getValue().flush(); iterator.remove();
+        pageBytes -= entry.getValue().bytes(); entry.getValue().clear(); iterator.remove();
       }
     }
     originalBytes -= document.original.length; document.clear();
@@ -193,6 +235,7 @@ public class BookPageRenderer {
 
   @Scheduled(fixedDelay = 30000, initialDelay = 30000)
   public void expireCache() {
+    prepared.expire();
     if (!capacity.tryAcquire()) return;
     try {
       long now=clock.getAsLong(); var iterator=documents.values().iterator();
@@ -206,6 +249,7 @@ public class BookPageRenderer {
 
   @PreDestroy
   public void close() {
+    prepared.close();
     capacity.acquireUninterruptibly();
     try { clear(); } finally { capacity.release(); }
   }

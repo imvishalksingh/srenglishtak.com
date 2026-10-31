@@ -112,4 +112,26 @@ class AuthServiceTest {
             .refresh(map("refresh_token", "old-refresh"));
     assertEquals("admin", ((Map<?, ?>) result.get("user")).get("role"));
   }
+  @Test void authenticatedRequestsReadFreshRoleAndRevocationTogetherWithoutCachingAuthorization() {
+    var verifier=mock(AccessTokenVerifier.class);var db=mock(Database.class);var remote=mock(SupabaseClient.class);
+    UUID id=UUID.randomUUID();
+    when(verifier.verify("access-fixture")).thenReturn(map("id",id,"role","admin"));
+    var row=new HashMap<String,Object>(map("id",id.toString(),"role","user","auth_revoked",false));
+    when(db.one(anyString(),any(),any())).thenAnswer(call->new HashMap<>(row));
+    var auth=new AuthService(remote,db,verifier,false,"","");
+    assertEquals("user",auth.authenticate("access-fixture").get("role"));
+    row.put("role","admin");assertEquals("admin",auth.authenticate("access-fixture").get("role"));
+    row.put("auth_revoked",true);
+    assertEquals(401,assertThrows(ApiException.class,()->auth.authenticate("access-fixture")).status());
+    verify(db,times(3)).one(anyString(),any(),any());verifyNoInteractions(remote);
+  }
+  @Test void revokedIdentityWithNoProfileCannotCreateANewProfileToBypassLogout() {
+    var verifier=mock(AccessTokenVerifier.class);var db=mock(Database.class);
+    when(verifier.verify("revoked-fixture")).thenReturn(map("id",UUID.randomUUID()));
+    when(db.one(anyString(),any(),any())).thenReturn(new HashMap<>(Map.of("auth_revoked",true)));
+    var auth=new AuthService(mock(SupabaseClient.class),db,verifier,false,"","");
+    assertEquals(401,assertThrows(ApiException.class,()->auth.authenticate("revoked-fixture")).status());
+    verify(db,never()).execute(anyString(),any());
+  }
+
 }

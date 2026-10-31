@@ -17,7 +17,14 @@ import org.junit.jupiter.api.*;
 
 class BookPageRendererTest {
   private StorageService storage;
-  private BookPageRenderer renderer;
+  private MeasuredRenderer renderer;
+  private static class MeasuredRenderer extends BookPageRenderer {
+    int rasters;
+    MeasuredRenderer(StorageService storage, java.util.function.LongSupplier clock) { super(storage,clock); }
+    @Override BufferedImage rasterize(PDDocument pdf,int page) throws IOException {
+      rasters++;return super.rasterize(pdf,page);
+    }
+  }
   private final AtomicLong clock = new AtomicLong();
   private Map<String,Object> book;
   private static final UUID USER = UUID.fromString("10000000-0000-0000-0000-000000000002");
@@ -29,7 +36,7 @@ class BookPageRendererTest {
     when(storage.privateFile(anyString())).thenReturn(true);
     pdf = pdf();
     when(storage.download(anyString())).thenAnswer(call -> new ByteArrayInputStream(pdf));
-    renderer = spy(new BookPageRenderer(storage, clock::get));
+    renderer = new MeasuredRenderer(storage,clock::get);
     book = new HashMap<>(Map.of("id",UUID.randomUUID(),"format_type","pdf","file_url","https://fixture/storage/v1/object/authenticated/book-files/one.pdf"));
   }
   @AfterEach void close() { renderer.close(); }
@@ -52,7 +59,7 @@ class BookPageRendererTest {
     page(1); page(2); page(1);
     verify(storage,times(1)).download(anyString());
     verify(storage,times(4)).requirePrivateBucket();
-    verify(renderer,times(2)).rasterize(any(),anyInt());
+    assertEquals(2,renderer.rasters);
   }
   @Test void cachedRasterNeverContainsAnotherReadersWatermark() throws Exception {
     byte[] first=page(1);
@@ -62,7 +69,7 @@ class BookPageRendererTest {
     var after=ImageIO.read(new ByteArrayInputStream(page(1)));
     assertArrayEquals(before.getRGB(0,0,1224,900,null,0,1224),after.getRGB(0,0,1224,900,null,0,1224));
     before.flush(); after.flush();
-    verify(renderer,times(1)).rasterize(any(),eq(1));
+    assertEquals(1,renderer.rasters);
   }
   @Test void storagePrivacyIsCheckedEvenOnWarmCacheAndFailureEvictsIt() {
     page(1);
@@ -82,10 +89,10 @@ class BookPageRendererTest {
     for (int i=0; i<6; i++) { clock.addAndGet(Duration.ofMinutes(5).toNanos()); page(1); }
     verify(storage,times(3)).download(anyString());
   }
-  @Test void morePagesEvictOldRastersWithinMemoryBudget() throws Exception {
+  @Test void preparedJpegSurvivesRasterEvictionWithoutRepeatingPdfRendering() throws Exception {
     page(1); page(2); page(3); page(1);
     verify(storage,times(1)).download(anyString());
-    verify(renderer,times(4)).rasterize(any(),anyInt());
+    assertEquals(3,renderer.rasters);
   }
   @Test void invalidPageOrPrivateUrlNeverLeaksOriginalBytes() {
     assertEquals(404,assertThrows(ApiException.class,() -> page(0)).status());
@@ -121,7 +128,7 @@ class BookPageRendererTest {
     var second=new HashMap<>(book); second.put("id",UUID.randomUUID()); second.put("file_url","https://fixture/storage/v1/object/authenticated/book-files/second.pdf");
     page(1); renderer.render(second,1,USER,SESSION); page(1);
     verify(storage,times(2)).download(anyString());
-    verify(renderer,times(2)).rasterize(any(),eq(1));
+    assertEquals(2,renderer.rasters);
   }
   @Test void documentCountAndGlobalPageBudgetEvictLeastRecentlyUsedEntries() throws Exception {
     for(int i=0;i<5;i++) {
@@ -133,12 +140,38 @@ class BookPageRendererTest {
     var first=new HashMap<>(book);first.put("id","book-0");first.put("file_url","https://fixture/storage/v1/object/authenticated/book-files/0.pdf");
     renderer.render(first,1,USER,SESSION); // Parsed source was evicted.
     verify(storage,times(6)).download(anyString());
-    verify(renderer,times(6)).rasterize(any(),eq(1));
-    // A third raster exceeds 16 MiB globally even though each book has only one page.
+    assertEquals(6,renderer.rasters);
+    // Personalized JPEGs survive neutral-raster turnover; the source LRU still bounds documents.
     var retained=new HashMap<>(book);retained.put("id","book-3");retained.put("file_url","https://fixture/storage/v1/object/authenticated/book-files/3.pdf");
     renderer.render(retained,1,USER,SESSION);
     verify(storage,times(6)).download(anyString());
-    verify(renderer,times(7)).rasterize(any(),eq(1));
+    assertEquals(6,renderer.rasters); // Personalized JPEG survived base-raster eviction.
+  }
+  @Test void losslessNeutralRastersSurviveLongerBooksAndCanBePersonalizedForNewSessions() {
+    page(1);page(2);page(3);
+    renderer.render(book,1,UUID.randomUUID(),UUID.randomUUID());
+    assertEquals(3,renderer.rasters); // No PDF re-render after a new account/session requests page 1.
+  }
+  @Test void productionPreparationUsesOneRealPdfRenderPerPageAndReusesPersonalizedResponses() throws Exception {
+    var warmed=new CountDownLatch(1);var rasters=new java.util.concurrent.atomic.AtomicInteger();
+    var live=new BookPageRenderer(storage,System::nanoTime,Duration.ofSeconds(5),true) {
+      @Override BufferedImage rasterize(PDDocument document,int page) throws IOException {
+        rasters.incrementAndGet();var image=super.rasterize(document,page);
+        if(page==3)warmed.countDown();return image;
+      }
+    };
+    try {
+      long started=System.nanoTime();byte[] first=live.render(book,2,USER,SESSION);
+      long firstMs=(System.nanoTime()-started)/1_000_000;
+      assertTrue(warmed.await(5,TimeUnit.SECONDS));
+      started=System.nanoTime();byte[] next=live.render(book,3,USER,SESSION);
+      long nextMs=(System.nanoTime()-started)/1_000_000;
+      started=System.nanoTime();byte[] previous=live.render(book,2,USER,SESSION);
+      long previousMs=(System.nanoTime()-started)/1_000_000;
+      assertArrayEquals(first,previous);assertNotNull(ImageIO.read(new ByteArrayInputStream(next)));
+      assertEquals(2,rasters.get());verify(storage,times(1)).download(anyString());
+      System.out.println("LOCAL_READER_PROBE first_ms="+firstMs+" next_ms="+nextMs+" previous_ms="+previousMs);
+    } finally {live.close();}
   }
   @Test void limitsConcurrentWorkAndCleanupDoesNotInterruptActiveRendering() throws Exception {
     var entered=new CountDownLatch(1); var release=new CountDownLatch(1);

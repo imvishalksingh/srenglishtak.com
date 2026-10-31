@@ -128,11 +128,16 @@ public class AuthService {
   }
 
   public Map<String, Object> authenticate(String token) {
-    if (db.count(
-            "select count(*) from revoked_access_tokens where token_hash=? and expires_at>now()",
-            AccessTokenVerifier.hash(token))
-        > 0) throw new ApiException(401, "Session has been signed out");
-    return ensureProfile(user(verifier.verify(token)));
+    var verified=user(verifier.verify(token));
+    // One fresh snapshot for both revocation and database-owned role; neither is cached.
+    var profile=db.one("""
+        select p.*, exists(select 1 from revoked_access_tokens
+          where token_hash=? and expires_at>now()) as auth_revoked
+        from (values(?::uuid)) identity(id) left join profiles p on p.id=identity.id
+        """,AccessTokenVerifier.hash(token),uuid(verified.get("id")));
+    if(Boolean.TRUE.equals(profile.remove("auth_revoked")))
+      throw new ApiException(401,"Session has been signed out");
+    return profile.get("id")==null ? ensureProfile(verified) : profile;
   }
 
   private Map<String, Object> session(Map<String, Object> raw) {

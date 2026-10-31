@@ -104,6 +104,7 @@ class BackendIntegrationTest {
     p.add("payments.razorpay-key-id", () -> "rzp_test_fixture");
     p.add("payments.razorpay-key-secret", () -> "test-secret");
     p.add("payments.razorpay-webhook-secret", () -> "webhook-secret");
+    p.add("reader.prepare-next-page", () -> false);
     p.add("reader.cloud-project-number", () -> 123);
     p.add("reader.certificate-sha256", () -> "ab".repeat(32));
     p.add("springdoc.api-docs.enabled", () -> true);
