@@ -19,11 +19,21 @@ public class ReaderBookAccess {
     this.db=db; this.settings=settings; this.purchases=purchases;
   }
   AuthorizedBook load(ApiPrincipal user, UUID book, UUID session) {
-    var row=query(user,book,session);
+    return load(user,book,session,null);
+  }
+  record AuthorizedChallenge(String publicKey, String requestHash) {}
+  AuthorizedChallenge challenge(ApiPrincipal user, UUID book, UUID challenge) {
+    var metadata=load(user,book,null,challenge).metadata();
+    if(metadata.get("challenge_public_key")==null)
+      throw new ApiException(403,"Reader challenge expired. Open the book again");
+    return new AuthorizedChallenge(metadata.get("challenge_public_key").toString(),metadata.get("challenge_hash").toString());
+  }
+  private AuthorizedBook load(ApiPrincipal user, UUID book, UUID session, UUID challenge) {
+    var row=query(user,book,session,challenge);
     if (!user.admin() && Boolean.TRUE.equals(row.get("reader_stale"))) {
       // Keep the existing Google receipt/refund recheck interval and failure behavior.
       purchases.requireAccess(user.id(),book,false);
-      row=query(user,book,session);
+      row=query(user,book,session,challenge);
     }
     boolean paid=row.get("price_paise") instanceof Number price && price.intValue()>0;
     boolean allowed=user.admin() || !paid || Boolean.TRUE.equals(row.get("reader_owned"));
@@ -35,11 +45,11 @@ public class ReaderBookAccess {
       throw new ApiException(503,"Private book storage is not configured");
     return new AuthorizedBook(row, Objects.toString(row.get("reader_public_key"),null));
   }
-  private Map<String,Object> query(ApiPrincipal user, UUID book, UUID session) {
+  private Map<String,Object> query(ApiPrincipal user, UUID book, UUID session, UUID challenge) {
     return db.one("""
         select b.*, coalesce(p.owned,false) as reader_owned, coalesce(p.stale,false) as reader_stale,
           exists(select 1 from storage.buckets where id='book-files' and public=false) as reader_private,
-          s.public_key as reader_public_key
+          s.public_key as reader_public_key, c.public_key as challenge_public_key, c.request_hash as challenge_hash
         from books b
         left join lateral (
           select count(*)>0 as owned,
@@ -47,7 +57,8 @@ public class ReaderBookAccess {
           from book_purchases where user_id=? and book_id=b.id and environment=? and status='active'
         ) p on true
         left join reader_sessions s on s.id=? and s.user_id=? and s.book_id=b.id and s.expires_at>now()
+        left join reader_challenges c on c.id=? and c.user_id=? and c.book_id=b.id and c.expires_at>now()
         where b.id=?
-        """, user.id(),settings.getMode(),session,user.id(),book);
+        """, user.id(),settings.getMode(),session,user.id(),challenge,user.id(),book);
   }
 }

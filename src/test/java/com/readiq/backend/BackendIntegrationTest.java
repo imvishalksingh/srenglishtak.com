@@ -716,6 +716,26 @@ class BackendIntegrationTest {
   }
 
   @Test
+  void googleStatusIsReadOnlyAccountBoundAndPreservesPendingCanceledAndPaidStates() throws Exception {
+    String id=paidBook().path("id").asText(),token="status-google-token";
+    for(String state:List.of("PURCHASED","PENDING","CANCELLED")) {
+      var receipt=googleReceipt(USER).deepCopy();
+      ((tools.jackson.databind.node.ObjectNode)receipt.path("purchaseStateContext")).put("purchaseState",state);
+      when(google.purchase(token)).thenReturn(receipt);
+      String expected=switch(state) { case "PURCHASED"->"purchased";case "PENDING"->"pending";default->"canceled"; };
+      assertEquals(expected,postJson("/api/payments/google/status","user",map("book_id",id,"purchase_token",token),200).path("state").asText());
+      postJson("/api/payments/google/status","other",map("book_id",id,"purchase_token",token),403);
+    }
+    var receipt=(tools.jackson.databind.node.ObjectNode)googleReceipt(USER);
+    receipt.remove("testPurchaseContext");when(google.purchase(token)).thenReturn(receipt);
+    postJson("/api/payments/google/status","user",map("book_id",id,"purchase_token",token),422);
+    when(google.purchase(token)).thenReturn(googleReceipt(USER));
+    postJson("/api/payments/google/status","user",map("book_id",book(true).path("id").asText(),"purchase_token",token),422);
+    assertEquals(0,jdbc.queryForObject("select count(*) from book_purchases",Integer.class));
+    verify(google,never()).acknowledge(anyString(),anyString());
+  }
+
+  @Test
   void googlePendingWrongProductAndLiveReceiptsNeverUnlockTestBooks() throws Exception {
     String id = paidBook().get("id").asText();
     String token = "google-invalid-token";
@@ -850,6 +870,9 @@ class BackendIntegrationTest {
 
   private ReaderTestSession openReader(String book, String account) throws Exception { return openReader(book,account,null); }
   private ReaderTestSession openReader(String book, String account, Integer initialPage) throws Exception {
+    return openReader(book,account,initialPage,false);
+  }
+  private ReaderTestSession openReader(String book, String account, Integer initialPage, boolean allowBusy) throws Exception {
     var generator = java.security.KeyPairGenerator.getInstance("EC");
     generator.initialize(new java.security.spec.ECGenParameterSpec("secp256r1"));
     var key = generator.generateKeyPair();
@@ -874,7 +897,16 @@ class BackendIntegrationTest {
       var changed=new LinkedHashMap<>(body);changed.put("initial_page", initialPage==1 ? 2 : 1);
       postJson("/api/books/"+book+"/reader/sessions",account,changed,403);
     }
-    var session = postJson("/api/books/" + book + "/reader/sessions", account, body, 200);
+    JsonNode session;
+    if (allowBusy) {
+      var response=mvc.perform(request(post("/api/books/"+book+"/reader/sessions"),account)
+          .contentType("application/json").content(json.writeValueAsString(body))).andReturn().getResponse();
+      if(response.getStatus()==503) {
+        assertEquals("Reader is busy. Please try again shortly",json.readTree(response.getContentAsString()).path("error").asText());
+        return null; // Deliberate bounded rendering capacity, not a database/session failure.
+      }
+      assertEquals(200,response.getStatus());session=json.readTree(response.getContentAsString());
+    } else session = postJson("/api/books/" + book + "/reader/sessions", account, body, 200);
     // Reusing a valid, consumed challenge never opens a second reader session.
     postJson("/api/books/" + book + "/reader/sessions", account, body, 403);
     return new ReaderTestSession(book, key, session);
@@ -920,6 +952,42 @@ class BackendIntegrationTest {
     postJson(pagePath(session,1),"user",readerProof(session,"page",1,Instant.now().getEpochSecond()),503);
     verify(storage,times(1)).download(anyString());
     mvc.perform(request(get("/api/books/"+id+"/stream"),"user")).andExpect(status().isGone());
+  }
+
+  @Test
+  void concurrentReaderActivationsKeepOnlyOneAccountSession() throws Exception {
+    readerPdfFixture();String id=book(true).path("id").asText();
+    jdbc.update("update books set file_url=? where id=?","http://127.0.0.1:9/storage/v1/object/authenticated/book-files/sessions.pdf",UUID.fromString(id));
+    try(var workers=java.util.concurrent.Executors.newVirtualThreadPerTaskExecutor()) {
+      var go=new java.util.concurrent.CountDownLatch(1);
+      var first=workers.submit(()->{go.await();return openReader(id,"user",null,true);});
+      var second=workers.submit(()->{go.await();return openReader(id,"user",null,true);});
+      go.countDown();var one=first.get(15,java.util.concurrent.TimeUnit.SECONDS);var two=second.get(15,java.util.concurrent.TimeUnit.SECONDS);
+      assertTrue(one!=null || two!=null,"At least one activation must succeed under contention");
+    }
+    assertEquals(1,jdbc.queryForObject("select count(*) from reader_sessions where user_id=?",Integer.class,USER));
+  }
+
+  @Test
+  void atomicPageNonceQuotaRejectsConcurrentReplaysWithoutSpendingExtraSlots() throws Exception {
+    readerPdfFixture(); String id=book(true).path("id").asText();
+    jdbc.update("update books set file_url=? where id=?","http://127.0.0.1:9/storage/v1/object/authenticated/book-files/concurrency.pdf",UUID.fromString(id));
+    var session=openReader(id,"user");
+    var store=new com.readiq.backend.security.DatabaseRateLimitStore(jdbc);
+    UUID sid=UUID.fromString(session.session().path("session_id").asText()), nonce=UUID.randomUUID();
+    String key="reader:concurrency:"+UUID.randomUUID();
+    try(var workers=java.util.concurrent.Executors.newVirtualThreadPerTaskExecutor()) {
+      var go=new java.util.concurrent.CountDownLatch(1);
+      var jobs=new ArrayList<java.util.concurrent.Future<String>>();
+      for(int i=0;i<8;i++) jobs.add(workers.submit(()->{go.await();return store.consumePage(sid,nonce,key,2,3600000);}));
+      go.countDown();var outcomes=new ArrayList<String>();
+      for(var job:jobs) outcomes.add(job.get(10,java.util.concurrent.TimeUnit.SECONDS));
+      assertEquals(1,Collections.frequency(outcomes,"allowed"));assertEquals(7,Collections.frequency(outcomes,"replay"));
+    }
+    assertEquals("allowed",store.consumePage(sid,UUID.randomUUID(),key,2,3600000));
+    assertEquals("limited",store.consumePage(sid,UUID.randomUUID(),key,2,3600000));
+    assertEquals(3,jdbc.queryForObject("select used from api_rate_limits where bucket_key=?",Integer.class,
+        com.readiq.backend.auth.AccessTokenVerifier.hash(key)));
   }
 
   @Test

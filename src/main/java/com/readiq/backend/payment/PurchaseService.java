@@ -164,6 +164,24 @@ public class PurchaseService {
     return map("book_id", book, "has_access", true, "status", "verified");
   }
 
+  public Map<String,Object> googleState(UUID user, UUID bookId, String token) {
+    settings.requireGoogle();
+    if(token==null || token.length()<10 || token.length()>8192) throw ApiException.bad("Invalid purchase token");
+    var result=google.purchase(token);
+    if(!account(user).equals(result.path("obfuscatedExternalAccountId").asText()))
+      throw new ApiException(403,"Purchase belongs to a different app account");
+    if(result.path("productLineItem").size()!=1) throw new ApiException(422,"Invalid purchased product");
+    String product=result.path("productLineItem").get(0).path("productId").asText();
+    var selected=bookId==null?books.byAndroidProduct(product).orElseThrow(ApiException::missing):book(bookId,true);
+    if(!product.equals(selected.android_product_id)) throw new ApiException(422,"Purchase does not match this non-consumable book");
+    if(result.has("testPurchaseContext")!=settings.getMode().equals("test")) throw new ApiException(422,"Purchase environment mismatch");
+    String state=switch(result.path("purchaseStateContext").path("purchaseState").asText()) {
+      case "PURCHASED" -> "purchased"; case "PENDING" -> "pending"; case "CANCELLED" -> "canceled";
+      default -> throw new ApiException(503,"Purchase status unavailable");
+    };
+    return map("book_id",selected.id,"state",state);
+  }
+
   void validateGoogle(JsonNode result, UUID user, String product) {
     if (!"PURCHASED".equals(result.path("purchaseStateContext").path("purchaseState").asText()))
       throw new ApiException(422, "Payment is pending, canceled, or refunded");

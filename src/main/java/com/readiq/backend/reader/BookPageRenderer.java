@@ -31,7 +31,12 @@ public class BookPageRenderer {
   private final LongSupplier clock;
   // PDFBox documents are not thread-safe. Keep bounded rendering on small production instances.
   private final Semaphore capacity = new Semaphore(1);
-  private CachedBook cached;
+  private static final int MAX_DOCUMENTS = 4;
+  private static final long SOURCE_MEMORY = 64L * 1024 * 1024;
+  private final LinkedHashMap<Source,CachedBook> documents = new LinkedHashMap<>(4,.75f,true);
+  private record PageKey(Source source, int number) {}
+  private final LinkedHashMap<PageKey,BufferedImage> pages = new LinkedHashMap<>(8,.75f,true);
+  private long originalBytes, pageBytes;
 
   private record Source(String id, String location) {}
   private static final class CachedBook {
@@ -39,14 +44,11 @@ public class BookPageRenderer {
     final byte[] original;
     final PDDocument pdf;
     final long created;
-    long used, pageBytes;
-    final LinkedHashMap<Integer, BufferedImage> pages = new LinkedHashMap<>(4, .75f, true);
+    long used;
     CachedBook(Source source, byte[] original, PDDocument pdf, long now) {
       this.source = source; this.original = original; this.pdf = pdf; created = used = now;
     }
     void clear() {
-      pages.values().forEach(BufferedImage::flush);
-      pages.clear(); pageBytes = 0;
       try { pdf.close(); } catch (IOException ignored) { /* Releasing all retained buffers still proceeds. */ }
       finally { Arrays.fill(original, (byte) 0); }
     }
@@ -69,18 +71,30 @@ public class BookPageRenderer {
     catch (RuntimeException failure) { clear(); throw failure; }
     long now = clock.getAsLong();
     var source = new Source(Objects.toString(book.get("id"), ""), url);
-    if (cached != null && (!cached.source.equals(source) || expired(cached, now))) clear();
+    var old = documents.values().iterator();
+    while (old.hasNext()) {
+      var document = old.next();
+      if (expired(document,now) || (document.source.id.equals(source.id) && !document.source.equals(source))) {
+        release(document); old.remove();
+      }
+    }
+    var cached = documents.get(source);
     if (cached != null) { cached.used = now; return cached; }
     byte[] bytes;
     try (var input = storage.download(url)) { bytes = input.readNBytes(MAX_BYTES + 1); }
     PDDocument pdf = null;
     try {
       if (bytes.length > MAX_BYTES) throw new ApiException(413, "Book exceeds the reader limit");
+      var eldest = documents.values().iterator();
+      while ((documents.size() >= MAX_DOCUMENTS || originalBytes + bytes.length > SOURCE_MEMORY) && eldest.hasNext()) {
+        release(eldest.next()); eldest.remove();
+      }
       // PDFBox's byte-array loader and its default stream cache are memory-only.
       pdf = Loader.loadPDF(bytes);
       if (pdf.getNumberOfPages() < 1 || pdf.getNumberOfPages() > 2000 || pdf.isEncrypted())
         throw new ApiException(422, "Book format is not supported by the protected reader");
       cached = new CachedBook(source, bytes, pdf, now);
+      documents.put(source,cached); originalBytes += bytes.length;
       return cached;
     } catch (IOException | RuntimeException failure) {
       try { if (pdf != null) pdf.close(); }
@@ -109,15 +123,16 @@ public class BookPageRenderer {
     try {
       var document = open(book,verifiedStorage);
       if (page < 1 || page > document.pdf.getNumberOfPages()) throw ApiException.missing();
-      BufferedImage base = document.pages.get(page);
+      var pageKey = new PageKey(document.source,page);
+      BufferedImage base = pages.get(pageKey);
       if (base == null) {
         base = rasterize(document.pdf, page);
         long bytes = memory(base);
-        var iterator = document.pages.values().iterator();
-        while (document.pageBytes + bytes > PAGE_MEMORY && iterator.hasNext()) {
-          var old = iterator.next(); document.pageBytes -= memory(old); old.flush(); iterator.remove();
+        var iterator = pages.values().iterator();
+        while (pageBytes + bytes > PAGE_MEMORY && iterator.hasNext()) {
+          var old = iterator.next(); pageBytes -= memory(old); old.flush(); iterator.remove();
         }
-        document.pages.put(page, base); document.pageBytes += bytes;
+        pages.put(pageKey, base); pageBytes += bytes;
       }
       int footer = footerSize(base.getWidth()) * 3;
       var image = new BufferedImage(base.getWidth(), base.getHeight() + footer, BufferedImage.TYPE_INT_RGB);
@@ -162,12 +177,30 @@ public class BookPageRenderer {
   private void acquire() {
     if (!capacity.tryAcquire()) throw new ApiException(503, "Reader is busy. Please try again shortly");
   }
-  private void clear() { if (cached != null) { cached.clear(); cached = null; } }
+  private void release(CachedBook document) {
+    var iterator = pages.entrySet().iterator();
+    while (iterator.hasNext()) {
+      var entry = iterator.next();
+      if (entry.getKey().source.equals(document.source)) {
+        pageBytes -= memory(entry.getValue()); entry.getValue().flush(); iterator.remove();
+      }
+    }
+    originalBytes -= document.original.length; document.clear();
+  }
+  private void clear() {
+    documents.values().forEach(this::release); documents.clear();
+  }
 
   @Scheduled(fixedDelay = 30000, initialDelay = 30000)
   public void expireCache() {
     if (!capacity.tryAcquire()) return;
-    try { if (cached != null && expired(cached, clock.getAsLong())) clear(); }
+    try {
+      long now=clock.getAsLong(); var iterator=documents.values().iterator();
+      while(iterator.hasNext()) {
+        var document=iterator.next();
+        if(expired(document,now)) { release(document); iterator.remove(); }
+      }
+    }
     finally { capacity.release(); }
   }
 

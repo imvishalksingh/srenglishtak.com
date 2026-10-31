@@ -48,6 +48,11 @@ public class PaymentController {
     return service.access(p.id(), id, p.admin(), true);
   }
 
+  @PostMapping("/payments/google/status")
+  public Object googleStatus(Authentication a, @Valid @RequestBody GooglePurchase body) {
+    return service.googleState(ApiPrincipal.from(a).id(),body.book_id(),body.purchase_token());
+  }
+
   @PostMapping("/payments/google/verify")
   public Object google(Authentication a, @Valid @RequestBody GooglePurchase body) {
     return service.verifyGoogle(ApiPrincipal.from(a).id(), body.book_id(), body.purchase_token());

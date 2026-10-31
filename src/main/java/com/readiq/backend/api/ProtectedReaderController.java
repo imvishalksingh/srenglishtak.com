@@ -23,35 +23,47 @@ public class ProtectedReaderController {
 
   @PostMapping("/challenge")
   public ResponseEntity<?> challenge(@PathVariable UUID book, @Valid @RequestBody ChallengeRequest body, Authentication a) {
-    long started=System.nanoTime();
-    return response(reader.challenge(ApiPrincipal.from(a), book, body.public_key()), MediaType.APPLICATION_JSON, started);
+    var timing=new Timings();
+    return response(reader.challenge(ApiPrincipal.from(a), book, body.public_key()), MediaType.APPLICATION_JSON, timing);
   }
 
   @PostMapping("/sessions")
   public ResponseEntity<?> activate(@PathVariable UUID book, @Valid @RequestBody ActivateRequest body, Authentication a) {
-    long started=System.nanoTime();
+    var timing=new Timings();
     return response(reader.activate(ApiPrincipal.from(a), book, body.challenge_id(), body.integrity_token(),
-        body.signature(), body.initial_page()), MediaType.APPLICATION_JSON, started);
+        body.signature(), body.initial_page(), timing::step), MediaType.APPLICATION_JSON, timing);
   }
 
   @PostMapping("/sessions/{session}/pages/{page}")
   public ResponseEntity<byte[]> page(@PathVariable UUID book, @PathVariable UUID session, @PathVariable int page,
       @Valid @RequestBody ProofRequest body, Authentication a) {
-    long started=System.nanoTime();
+    var timing=new Timings();
     return response(reader.page(ApiPrincipal.from(a), book, session, page, body.timestamp(), body.nonce(),
-        body.signature()), MediaType.IMAGE_JPEG, started);
+        body.signature(), timing::step), MediaType.IMAGE_JPEG, timing);
   }
 
   @PostMapping("/sessions/{session}/close")
   public ResponseEntity<?> close(@PathVariable UUID book, @PathVariable UUID session,
       @Valid @RequestBody ProofRequest body, Authentication a) {
-    long started=System.nanoTime();
+    var timing=new Timings();
     reader.close(ApiPrincipal.from(a), book, session, body.timestamp(), body.nonce(), body.signature());
-    return response(java.util.Map.of("closed", true), MediaType.APPLICATION_JSON, started);
+    return response(java.util.Map.of("closed", true), MediaType.APPLICATION_JSON, timing);
   }
 
-  private static <T> ResponseEntity<T> response(T body, MediaType type, long started) {
-    return ResponseEntity.ok().header("Server-Timing", "reader;dur="+((System.nanoTime()-started)/1_000_000)).contentType(type).header("Cache-Control", "private, no-store, max-age=0")
+  // Fixed stage names and durations only; never identifiers, URLs or receipt material.
+  private static final class Timings {
+    final long started=System.nanoTime(); long previous=started;
+    final StringBuilder phases=new StringBuilder();
+    void step(String phase) {
+      long now=System.nanoTime();
+      phases.append(", ").append(phase).append(";dur=").append((now-previous)/1_000_000);
+      previous=now;
+    }
+    String header() { return "reader;dur="+((System.nanoTime()-started)/1_000_000)+phases; }
+  }
+
+  private static <T> ResponseEntity<T> response(T body, MediaType type, Timings timing) {
+    return ResponseEntity.ok().header("Server-Timing", timing.header()).contentType(type).header("Cache-Control", "private, no-store, max-age=0")
         .header("Pragma", "no-cache").header("X-Content-Type-Options", "nosniff")
         .header("Cross-Origin-Resource-Policy", "same-origin").body(body);
   }

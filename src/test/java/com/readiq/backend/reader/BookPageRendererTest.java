@@ -117,6 +117,29 @@ class BookPageRendererTest {
     assertEquals(0,dark); assertTrue(changed>100); assertTrue(changed<image.getWidth()*1280*.035);
     assertTrue(readable>100); image.flush();
   }
+  @Test void switchingBetweenBooksRetainsTheirParsedDocumentsAndWarmPages() throws Exception {
+    var second=new HashMap<>(book); second.put("id",UUID.randomUUID()); second.put("file_url","https://fixture/storage/v1/object/authenticated/book-files/second.pdf");
+    page(1); renderer.render(second,1,USER,SESSION); page(1);
+    verify(storage,times(2)).download(anyString());
+    verify(renderer,times(2)).rasterize(any(),eq(1));
+  }
+  @Test void documentCountAndGlobalPageBudgetEvictLeastRecentlyUsedEntries() throws Exception {
+    for(int i=0;i<5;i++) {
+      var other=new HashMap<>(book);other.put("id","book-"+i);other.put("file_url","https://fixture/storage/v1/object/authenticated/book-files/"+i+".pdf");
+      renderer.render(other,1,USER,SESSION);
+    }
+    var last=new HashMap<>(book);last.put("id","book-4");last.put("file_url","https://fixture/storage/v1/object/authenticated/book-files/4.pdf");
+    renderer.render(last,1,USER,SESSION); // Remains warm.
+    var first=new HashMap<>(book);first.put("id","book-0");first.put("file_url","https://fixture/storage/v1/object/authenticated/book-files/0.pdf");
+    renderer.render(first,1,USER,SESSION); // Parsed source was evicted.
+    verify(storage,times(6)).download(anyString());
+    verify(renderer,times(6)).rasterize(any(),eq(1));
+    // A third raster exceeds 16 MiB globally even though each book has only one page.
+    var retained=new HashMap<>(book);retained.put("id","book-3");retained.put("file_url","https://fixture/storage/v1/object/authenticated/book-files/3.pdf");
+    renderer.render(retained,1,USER,SESSION);
+    verify(storage,times(6)).download(anyString());
+    verify(renderer,times(7)).rasterize(any(),eq(1));
+  }
   @Test void limitsConcurrentWorkAndCleanupDoesNotInterruptActiveRendering() throws Exception {
     var entered=new CountDownLatch(1); var release=new CountDownLatch(1);
     doAnswer(call -> { entered.countDown(); assertTrue(release.await(5,TimeUnit.SECONDS)); return new ByteArrayInputStream(pdf); }).when(storage).download(anyString());

@@ -45,41 +45,52 @@ public class ProtectedReaderService {
   }
 
   public Session activate(ApiPrincipal user, UUID book, UUID challenge, String token, String signature, Integer initialPage) {
-    access.load(user,book,null);
-    var row = db.optional("select * from reader_challenges where id=? and user_id=? and book_id=?"
-            + " and expires_at>now()", challenge, user.id(), book)
-        .orElseThrow(() -> new ApiException(403, "Reader challenge expired. Open the book again"));
-    String key = row.get("public_key").toString(), hash = row.get("request_hash").toString();
+    return activate(user,book,challenge,token,signature,initialPage,ignored -> {});
+  }
+  public Session activate(ApiPrincipal user, UUID book, UUID challenge, String token, String signature,
+      Integer initialPage, java.util.function.Consumer<String> timing) {
+    var row = access.challenge(user,book,challenge);
+    String key = row.publicKey(), hash = row.requestHash();
     ReaderCrypto.verify(key, "activate\n" + challenge + "\n" + hash
         + (initialPage==null ? "" : "\npage\n"+initialPage), signature);
     limit("activate:" + user.id(), 6, 60000);
     // Consume before the external call so a replay cannot spend verification/render capacity.
     if (db.execute("delete from reader_challenges where id=? and user_id=? and expires_at>now()",
         challenge, user.id()) != 1) throw new ApiException(403, "Reader challenge was already used");
-    integrity.verify(token, hash);
-    var verifiedBook = access.load(user,book,null);
-    int count = renderer.pageCount(verifiedBook);
+    timing.accept("authorize");
+    integrity.verify(token, hash); timing.accept("integrity");
+    var verifiedBook = access.load(user,book,null); timing.accept("entitlement");
+    int count = renderer.pageCount(verifiedBook); timing.accept("document");
     UUID id = UUID.randomUUID();
     long expiry = Instant.now().plusSeconds(300).getEpochSecond();
     tx.executeWithoutResult(status -> {
       // Account lock coordinates concurrent session creation across replicas.
       db.one("select id from profiles where id=? for update", user.id());
-      db.execute("delete from reader_sessions where user_id=?", user.id());
-      db.execute("insert into reader_sessions(id,user_id,book_id,public_key,expires_at)"
-          + " values(?,?,?,?,to_timestamp(?))", id, user.id(), book, key, expiry);
+      // Keep the lock in the previous statement: READ COMMITTED needs a fresh
+      // snapshot after a competing session creator commits.
+      db.execute("with previous as (delete from reader_sessions where user_id=? returning id)"
+          + " insert into reader_sessions(id,user_id,book_id,public_key,expires_at)"
+          + " select ?,?,?,?,to_timestamp(?) from (select count(*) from previous) removed", user.id(), id, user.id(), book, key, expiry);
     });
+    timing.accept("session");
     Integer requested=initialPage==null ? null : Math.min(initialPage,count);
     if (requested!=null) limit("page:"+user.id(),30,60000);
     byte[] image=requested==null ? null : renderer.render(verifiedBook,requested,user.id(),id);
+    timing.accept("render");
     return new Session(id, count, expiry, requested, image);
   }
 
   public byte[] page(ApiPrincipal user, UUID book, UUID session, int page,
       long timestamp, UUID nonce, String signature) {
+    return page(user,book,session,page,timestamp,nonce,signature,ignored -> {});
+  }
+  public byte[] page(ApiPrincipal user, UUID book, UUID session, int page,
+      long timestamp, UUID nonce, String signature, java.util.function.Consumer<String> timing) {
     if (page < 1 || page > 2000) throw ApiException.missing();
     var verifiedBook=authorize(user, book, session, "page", page, timestamp, nonce, signature);
-    limit("page:" + user.id(), 30, 60000);
-    return renderer.render(verifiedBook, page, user.id(), session);
+    timing.accept("authorize");
+    byte[] image=renderer.render(verifiedBook,page,user.id(),session);
+    timing.accept("render"); return image;
   }
 
   public void close(ApiPrincipal user, UUID book, UUID session, long timestamp, UUID nonce, String signature) {
@@ -95,7 +106,11 @@ public class ProtectedReaderService {
       throw new ApiException(403, "Reader request expired");
     ReaderCrypto.verify(verifiedBook.publicKey(),
         ReaderCrypto.proof(action, book, session, page, timestamp, nonce), signature);
-    if (db.execute("insert into reader_request_nonces(session_id,nonce,expires_at)"
+    if (action.equals("page")) {
+      String result=limits.consumePage(session,nonce,"reader:page:"+user.id(),30,60000);
+      if ("replay".equals(result)) throw new ApiException(403,"Reader request was already used");
+      if (!"allowed".equals(result)) throw new ApiException(429,"Please slow down and try again shortly");
+    } else if (db.execute("insert into reader_request_nonces(session_id,nonce,expires_at)"
             + " values(?,?,now()+interval '60 seconds') on conflict do nothing", session, nonce) != 1)
       throw new ApiException(403, "Reader request was already used");
     return verifiedBook;
