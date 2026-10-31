@@ -1,0 +1,7 @@
+{
+  "healthChecks": [
+    { "protocol": "HTTP", "type": "startupProbe", "port": 8080, "path": "/health/live", "initialDelaySeconds": 5, "periodSeconds": 10, "timeoutSeconds": 5, "failureThreshold": 30, "successThreshold": 1 },
+    { "protocol": "HTTP", "type": "livenessProbe", "port": 8080, "path": "/health/live", "initialDelaySeconds": 0, "periodSeconds": 20, "timeoutSeconds": 5, "failureThreshold": 3, "successThreshold": 1 },
+    { "protocol": "HTTP", "type": "readinessProbe", "port": 8080, "path": "/health/ready", "initialDelaySeconds": 0, "periodSeconds": 10, "timeoutSeconds": 8, "failureThreshold": 3, "successThreshold": 1 }
+  ]
+}

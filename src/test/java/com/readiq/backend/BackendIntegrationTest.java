@@ -37,6 +37,37 @@ import tools.jackson.databind.*;
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 @EnabledIfEnvironmentVariable(named = "READIQ_TEST_DB_URL", matches = ".+")
 class BackendIntegrationTest {
+  @Test void bookCoverEndpointKeepsDocumentsPrivateAndHonorsHiddenBookAccess() throws Exception {
+    var row = book(true);
+    UUID book = UUID.fromString(row.get("id").asText());
+    jdbc.update("update books set cover_url=? where id=?", "http://127.0.0.1:9/storage/v1/object/public/books/cover.png",book);
+    byte[] image = BookCoverServiceTest.png(2,2);
+    doAnswer(call -> new java.io.ByteArrayInputStream(image)).when(storage).downloadCover(anyString());
+    mvc.perform(get("/api/books/"+book+"/cover")).andExpect(status().isOk())
+        .andExpect(content().contentType("image/jpeg"))
+        .andExpect(header().string("X-Content-Type-Options","nosniff"));
+    jdbc.update("update books set is_visible=false where id=?",book);
+    mvc.perform(get("/api/books/"+book+"/cover")).andExpect(status().isNotFound());
+    mvc.perform(request(get("/api/books/"+book+"/cover"),"user")).andExpect(status().isNotFound());
+    jdbc.update("insert into book_purchases(user_id,book_id,provider,environment,reference_hash,status) values(?,?,'google_play','test',?,'active')",USER,book,UUID.randomUUID().toString());
+    mvc.perform(request(get("/api/books/"+book+"/cover"),"user")).andExpect(status().isOk())
+        .andExpect(header().string("Cache-Control","private, no-store"));
+    mvc.perform(request(get("/api/books/"+book+"/cover"),"other")).andExpect(status().isNotFound());
+    mvc.perform(request(get("/api/books/"+book+"/cover"),"admin")).andExpect(status().isOk());
+    mvc.perform(request(get("/api/books/"+book+"/stream"),"user")).andExpect(status().isGone());
+  }
+
+  @Test
+  void operationalProbesAreAnonymousAndDoNotChangeLegacyHealthContract() throws Exception {
+    mvc.perform(get("/health")).andExpect(status().isOk()).andExpect(jsonPath("$.status").value("ok"));
+    mvc.perform(get("/health/live")).andExpect(status().isOk())
+        .andExpect(header().string("Cache-Control", "no-store"))
+        .andExpect(jsonPath("$.status").value("UP"));
+    mvc.perform(get("/health/ready")).andExpect(status().isOk())
+        .andExpect(jsonPath("$.status").value("UP"));
+    assertEquals(0, jdbc.queryForObject("select count(*) from api_rate_limits", Integer.class));
+  }
+
   static final UUID ADMIN = UUID.fromString("10000000-0000-0000-0000-000000000001"),
       USER = UUID.fromString("10000000-0000-0000-0000-000000000002"),
       OTHER = UUID.fromString("10000000-0000-0000-0000-000000000003");
@@ -110,6 +141,7 @@ class BackendIntegrationTest {
             + " storage.objects FOR SELECT TO authenticated USING(true); END IF; END $$");
     jdbc.execute(Files.readString(Path.of("db/003_purchases_and_limits.sql")));
     jdbc.execute(Files.readString(Path.of("db/004_protected_reader.sql")));
+    jdbc.execute(Files.readString(Path.of("db/005_admin_cover_storage.sql")));
   }
 
   @BeforeEach
@@ -1004,11 +1036,13 @@ class BackendIntegrationTest {
   void privateStoragePolicyOverridesOldBroadClientPolicies() {
     jdbc.execute("truncate storage.objects");
     jdbc.update(
-        "insert into storage.objects(id,bucket_id) values(?,?),(?,?)",
+        "insert into storage.objects(id,bucket_id) values(?,?),(?,?),(?,?)",
         UUID.randomUUID(),
         "book-files",
         UUID.randomUUID(),
-        "books");
+        "books",
+        UUID.randomUUID(),
+        "book-covers");
     jdbc.execute(
         (ConnectionCallback<Void>)
             connection -> {
@@ -1017,6 +1051,11 @@ class BackendIntegrationTest {
                 try (var result =
                     statement.executeQuery(
                         "select count(*) from storage.objects where bucket_id='book-files'")) {
+                  result.next();
+                  assertEquals(0, result.getInt(1));
+                }
+                try (var result = statement.executeQuery(
+                        "select count(*) from storage.objects where bucket_id='book-covers'")) {
                   result.next();
                   assertEquals(0, result.getInt(1));
                 }
@@ -1077,4 +1116,43 @@ class BackendIntegrationTest {
             post("/api/payments/razorpay/webhook").contentType("application/json").content("{}"))
         .andExpect(status().isBadRequest());
   }
+  @Test
+  void weeklyLearningGoalCombinesSavedActivityAndIsolatesAccounts() throws Exception {
+    UUID unit = UUID.randomUUID(), lesson = UUID.randomUUID(), quiz = UUID.randomUUID(), challenge = UUID.randomUUID();
+    String bookId = book(true).get("id").asText();
+    jdbc.update("insert into grammar_units(id,title,unit_order) values(?,?,1)", unit, "Grammar fixture");
+    jdbc.update("insert into grammar_lessons(id,unit_id,title,lesson_order) values(?,?,?,1)", lesson, unit, "Lesson fixture");
+    postJson("/api/grammar/lessons/" + lesson + "/complete", "user", Map.of(), 200);
+    postJson("/api/grammar/lessons/" + lesson + "/complete", "user", Map.of(), 200);
+    mvc.perform(request(get("/api/grammar/overview"), "user"))
+        .andExpect(status().isOk()).andExpect(jsonPath("$.units.length()").value(1))
+        .andExpect(jsonPath("$.lessons.length()").value(1))
+        .andExpect(jsonPath("$.lessons[0].content_data").doesNotExist())
+        .andExpect(jsonPath("$.progress.length()").value(1));
+    mvc.perform(request(get("/api/grammar/overview"), "other"))
+        .andExpect(status().isOk()).andExpect(jsonPath("$.progress.length()").value(0));
+    jdbc.update("insert into quizzes(id,title,type) values(?,?,'general')", quiz, "Quiz fixture");
+    jdbc.update("insert into quiz_attempts(user_id,quiz_id,score,total_questions,answers_json) values(?,?,0,1,'[]'::jsonb)", USER, quiz);
+    jdbc.update("insert into challenges(id,name) values(?,?)", challenge, "Challenge fixture");
+    jdbc.update("insert into challenge_results(user_id,challenge_id,score,time_taken_ms) values(?,?,0,1000)", USER, challenge);
+    jdbc.update("insert into reading_sessions(user_id,book_id,minutes_spent) values(?,?,1)", USER, UUID.fromString(bookId));
+    mvc.perform(get("/api/user/weekly-goal")).andExpect(status().isUnauthorized());
+    mvc.perform(request(get("/api/user/weekly-goal"),"user")).andExpect(status().isOk())
+        .andExpect(jsonPath("$.active_dates.length()").value(1))
+        .andExpect(jsonPath("$.target_days").value(7));
+    mvc.perform(request(get("/api/user/weekly-goal"),"other")).andExpect(status().isOk())
+        .andExpect(jsonPath("$.active_dates.length()").value(0));
+    mvc.perform(request(get("/api/user/insights"), "user"))
+        .andExpect(status().isOk()).andExpect(jsonPath("$.weekly_goal.target_days").value(7))
+        .andExpect(jsonPath("$.weekly_goal.time_zone").value("Asia/Kolkata"))
+        .andExpect(jsonPath("$.weekly_goal.active_dates.length()").value(1));
+    mvc.perform(request(get("/api/user/insights"), "other"))
+        .andExpect(status().isOk()).andExpect(jsonPath("$.weekly_goal.active_dates.length()").value(0));
+    for (String table : List.of("grammar_progress", "quiz_attempts", "challenge_results"))
+      jdbc.update("update " + table + " set completed_at=now()-interval '14 days' where user_id=?", USER);
+    jdbc.update("update reading_sessions set started_at=now()-interval '14 days' where user_id=?", USER);
+    mvc.perform(request(get("/api/user/insights"), "user"))
+        .andExpect(status().isOk()).andExpect(jsonPath("$.weekly_goal.active_dates.length()").value(0));
+  }
+
 }

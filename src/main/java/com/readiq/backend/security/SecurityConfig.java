@@ -42,7 +42,7 @@ public class SecurityConfig {
                     .permitAll()
                     .requestMatchers("/error")
                     .permitAll()
-                    .requestMatchers(HttpMethod.GET, "/", "/health")
+                    .requestMatchers(HttpMethod.GET, "/", "/health", "/health/live", "/health/ready")
                     .permitAll()
                     .requestMatchers(
                         HttpMethod.POST,
@@ -59,6 +59,7 @@ public class SecurityConfig {
                         "/swagger-ui.html",
                         "/api/books",
                         "/api/books/*",
+                        "/api/books/*/cover",
                         "/api/tips",
                         "/api/tips/*",
                         "/api/vocabulary",

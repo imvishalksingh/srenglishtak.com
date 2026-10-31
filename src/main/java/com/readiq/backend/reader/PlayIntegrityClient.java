@@ -4,7 +4,7 @@ import com.google.auth.oauth2.*;
 import com.readiq.backend.api.ApiException;
 import java.net.URI;
 import java.net.http.*;
-import java.nio.file.*;
+import com.readiq.backend.auth.ServiceAccountLoader;
 import java.time.Duration;
 import org.springframework.stereotype.Component;
 import tools.jackson.databind.*;
@@ -23,12 +23,17 @@ public class PlayIntegrityClient {
     this.json = json;
   }
 
+  @jakarta.annotation.PostConstruct
+  public void validateConfiguration() {
+    if (settings.hasCredentials()) credentials = ServiceAccountLoader.load(
+        settings.credentialsFile(), settings.credentialsJson(),
+        "https://www.googleapis.com/auth/playintegrity");
+  }
+
   private synchronized String bearer() throws Exception {
     if (credentials == null) {
-      try (var input = Files.newInputStream(Path.of(settings.credentialsFile()))) {
-        credentials = ServiceAccountCredentials.fromStream(input)
-            .createScoped("https://www.googleapis.com/auth/playintegrity");
-      }
+      credentials = ServiceAccountLoader.load(settings.credentialsFile(), settings.credentialsJson(),
+          "https://www.googleapis.com/auth/playintegrity");
     }
     credentials.refreshIfExpired();
     return credentials.getAccessToken().getTokenValue();

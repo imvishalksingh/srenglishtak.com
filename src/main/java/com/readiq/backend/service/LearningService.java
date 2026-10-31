@@ -160,6 +160,13 @@ public class LearningService {
     return db.update("profiles", user, v);
   }
 
+  public Object grammarOverview(UUID user) {
+    return map(
+        "units", db.list("select * from grammar_units order by unit_order,id"),
+        "lessons", db.list("select id,unit_id,title,content_type,lesson_order,created_at from grammar_lessons order by lesson_order,id"),
+        "progress", grammarProgress(user));
+  }
+
   public Object grammarProgress(UUID user) {
     return db.list(
         "select * from grammar_progress where user_id=? order by completed_at desc,id", user);

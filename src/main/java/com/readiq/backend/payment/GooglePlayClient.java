@@ -1,12 +1,11 @@
 package com.readiq.backend.payment;
 
 import com.google.auth.oauth2.GoogleCredentials;
-import com.google.auth.oauth2.ServiceAccountCredentials;
+import com.readiq.backend.auth.ServiceAccountLoader;
 import com.readiq.backend.api.ApiException;
 import java.net.*;
 import java.net.http.*;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.*;
 import java.time.Duration;
 import java.util.*;
 import org.springframework.stereotype.Component;
@@ -38,15 +37,12 @@ public class GooglePlayClient {
     try {
       if (Base64.getDecoder().decode(settings.getTokenEncryptionKey()).length != 32)
         throw new IllegalArgumentException();
-      try (var input = Files.newInputStream(Path.of(settings.getGoogleCredentialsFile()))) {
-        credentials =
-            ServiceAccountCredentials.fromStream(input)
-                .createScoped("https://www.googleapis.com/auth/androidpublisher");
-      }
     } catch (Exception ex) {
       throw new IllegalStateException(
-          "Google Play service-account file or purchase-token encryption key is invalid");
+          "PAYMENT_TOKEN_ENCRYPTION_KEY must be base64 of 32 bytes; preserve the existing production key");
     }
+    credentials = ServiceAccountLoader.load(settings.getGoogleCredentialsFile(),
+        settings.getGoogleCredentialsJson(), "https://www.googleapis.com/auth/androidpublisher");
   }
 
   public JsonNode purchase(String token) {
@@ -61,11 +57,8 @@ public class GooglePlayClient {
   private synchronized String bearer() throws Exception {
     settings.requireGoogle();
     if (credentials == null) {
-      try (var input = Files.newInputStream(Path.of(settings.getGoogleCredentialsFile()))) {
-        credentials =
-            ServiceAccountCredentials.fromStream(input)
-                .createScoped("https://www.googleapis.com/auth/androidpublisher");
-      }
+      credentials = ServiceAccountLoader.load(settings.getGoogleCredentialsFile(),
+          settings.getGoogleCredentialsJson(), "https://www.googleapis.com/auth/androidpublisher");
     }
     credentials.refreshIfExpired();
     return credentials.getAccessToken().getTokenValue();

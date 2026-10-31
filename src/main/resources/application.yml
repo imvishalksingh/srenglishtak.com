@@ -70,6 +70,7 @@ payments:
   razorpay-key-secret: ${RAZORPAY_KEY_SECRET:}
   razorpay-webhook-secret: ${RAZORPAY_WEBHOOK_SECRET:}
   google-credentials-file: ${GOOGLE_PLAY_CREDENTIALS_FILE:}
+  google-credentials-json: ${GOOGLE_PLAY_CREDENTIALS_JSON:}
   google-package-name: ${GOOGLE_PLAY_PACKAGE_NAME:com.srenglishtak.app}
   token-encryption-key: ${PAYMENT_TOKEN_ENCRYPTION_KEY:}
 
@@ -77,6 +78,7 @@ payments:
 reader:
   cloud-project-number: ${PLAY_INTEGRITY_CLOUD_PROJECT_NUMBER:0}
   credentials-file: ${PLAY_INTEGRITY_CREDENTIALS_FILE:${payments.google-credentials-file:}}
+  credentials-json: ${PLAY_INTEGRITY_CREDENTIALS_JSON:${payments.google-credentials-json:}}
   package-name: ${GOOGLE_PLAY_PACKAGE_NAME:com.srenglishtak.app}
   certificate-sha256: ${PLAY_INTEGRITY_CERTIFICATE_SHA256:}
   minimum-version-code: ${READER_MINIMUM_VERSION_CODE:10}

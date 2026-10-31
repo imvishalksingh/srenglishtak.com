@@ -76,10 +76,26 @@ public class ReportingService {
       unlock(user, "streak_3", "3 Day Streak", "Stayed active for 3 days in a row.");
     if (longest >= 7)
       unlock(user, "streak_7", "7 Day Streak", "Stayed active for 7 days in a row.");
+    result.put("weekly_goal", weeklyGoal(user));
     result.put(
         "achievements_unlocked",
         db.count("select count(*) from user_achievements where user_id=?", user));
     return result;
+  }
+
+  public Map<String, Object> weeklyGoal(UUID user) {
+    Instant now = Instant.now();
+    Instant from = WeeklyLearningGoal.weekStart(now, zone).atStartOfDay(zone).toInstant();
+    var events = db.list(
+        "select occurred_at from ("
+            + "select started_at as occurred_at from reading_sessions where user_id=? and (minutes_spent>0 or pages_read>0)"
+            + " union all select completed_at from grammar_progress where user_id=? and is_completed=true"
+            + " union all select completed_at from quiz_attempts where user_id=?"
+            + " union all select completed_at from challenge_results where user_id=?"
+            + ") activity where occurred_at>=? and occurred_at<=?",
+        user, user, user, user, from.atOffset(ZoneOffset.UTC), now.atOffset(ZoneOffset.UTC));
+    var instants = events.stream().map(row -> AssessmentService.instant(row.get("occurred_at"))).toList();
+    return WeeklyLearningGoal.summarize(now, zone, instants);
   }
 
   private void unlock(UUID user, String code, String title, String description) {

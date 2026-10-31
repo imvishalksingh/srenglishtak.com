@@ -11,6 +11,7 @@ public class PaymentSettings {
       razorpayKeyId = "",
       razorpayKeySecret = "",
       razorpayWebhookSecret = "";
+  private String googleCredentialsJson = "";
   private String googleCredentialsFile = "",
       googlePackageName = "com.srenglishtak.app",
       tokenEncryptionKey = "";
@@ -57,6 +58,9 @@ public class PaymentSettings {
     googleCredentialsFile = v;
   }
 
+  public String getGoogleCredentialsJson() { return googleCredentialsJson; }
+  public void setGoogleCredentialsJson(String value) { googleCredentialsJson = value; }
+
   public String getGooglePackageName() {
     return googlePackageName;
   }
@@ -75,7 +79,7 @@ public class PaymentSettings {
 
   public boolean googleEnabled() {
     return !mode.equals("disabled")
-        && !googleCredentialsFile.isBlank()
+        && (!googleCredentialsFile.isBlank() || !googleCredentialsJson.isBlank())
         && !tokenEncryptionKey.isBlank();
   }
 

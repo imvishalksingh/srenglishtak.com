@@ -16,7 +16,7 @@ public class PlayIntegrityVerifier {
   }
 
   public void requireConfigured() {
-    if (settings.cloudProjectNumber() <= 0 || settings.credentialsFile().isBlank()
+    if (settings.cloudProjectNumber() <= 0 || !settings.hasCredentials()
         || settings.certificateSha256().isBlank())
       throw new ApiException(503, "Protected reader setup is incomplete");
   }

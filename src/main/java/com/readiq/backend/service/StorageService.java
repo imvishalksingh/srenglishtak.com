@@ -57,8 +57,9 @@ public class StorageService {
       if (purpose.equals("book") && !ext.equals(".pdf"))
         throw ApiException.bad("Protected books must be uploaded as PDF");
       boolean document = purpose.equals("book");
-      String bucket = document ? "book-files" : "books";
+      String bucket = document ? "book-files" : "book-covers";
       if (document) requirePrivateBucket();
+      else requirePublicCoverBucket();
       String object = UUID.randomUUID() + ext;
       var request =
           HttpRequest.newBuilder(URI.create(url + "/storage/v1/object/" + bucket + "/" + object))
@@ -74,7 +75,7 @@ public class StorageService {
         throw new ApiException(502, "Storage upload failed");
       return url
           + "/storage/v1/object/"
-          + (document ? "authenticated/book-files/" : "public/books/")
+          + (document ? "authenticated/book-files/" : "public/book-covers/")
           + object;
     } catch (ApiException ex) {
       throw ex;
@@ -213,6 +214,41 @@ public class StorageService {
     }
   }
 
+  // Never make the legacy books bucket public: it may contain old document copies.
+  private void requirePublicCoverBucket() {
+    try {
+      var request = HttpRequest.newBuilder(URI.create(url + "/storage/v1/bucket/book-covers"))
+          .timeout(Duration.ofSeconds(10))
+          .header("Authorization", "Bearer " + key).header("apikey", key).GET().build();
+      var response = client.send(request, HttpResponse.BodyHandlers.ofString());
+      var mapper = tools.jackson.databind.json.JsonMapper.builder().build();
+      var details = mapper.readTree(response.body());
+      if (response.statusCode() == 404 || (response.statusCode() == 400
+          && "Bucket not found".equals(details.path("error").asText()))) {
+        var create = HttpRequest.newBuilder(URI.create(url + "/storage/v1/bucket"))
+            .timeout(Duration.ofSeconds(10)).header("Authorization", "Bearer " + key)
+            .header("apikey", key).header("Content-Type", "application/json")
+            .POST(HttpRequest.BodyPublishers.ofString(
+                "{\"id\":\"book-covers\",\"name\":\"book-covers\",\"public\":true,"
+                + "\"file_size_limit\":52428800,\"allowed_mime_types\":[\"image/png\",\"image/jpeg\",\"image/webp\",\"image/gif\"]}"))
+            .build();
+        // Re-read after creation, including races where another upload created it first.
+        client.send(create, HttpResponse.BodyHandlers.discarding());
+        response = client.send(request, HttpResponse.BodyHandlers.ofString());
+      }
+      var body = tools.jackson.databind.json.JsonMapper.builder().build().readTree(response.body());
+      if (response.statusCode() != 200 || !body.path("public").asBoolean(false))
+        throw new ApiException(503, "Public cover image storage is not configured");
+    } catch (ApiException ex) {
+      throw ex;
+    } catch (InterruptedException ex) {
+      Thread.currentThread().interrupt();
+      throw new ApiException(503, "Cover image storage unavailable");
+    } catch (Exception ex) {
+      throw new ApiException(503, "Cover image storage unavailable");
+    }
+  }
+
   public void requirePrivateBucket() {
     try {
       var req =
@@ -239,6 +275,14 @@ public class StorageService {
   }
 
   public InputStream download(String publicUrl) {
+    return downloadObject(publicUrl, false);
+  }
+
+  public InputStream downloadCover(String publicUrl) {
+    return downloadObject(publicUrl, true);
+  }
+
+  private InputStream downloadObject(String publicUrl, boolean cover) {
     URI configured = URI.create(url), file;
     try {
       file = URI.create(publicUrl);
@@ -252,13 +296,39 @@ public class StorageService {
         || file.getRawFragment() != null
         || file.getRawQuery() != null
         || file.getUserInfo() != null
-        || !(file.getPath().startsWith("/storage/v1/object/public/books/")
-            || file.getPath().startsWith("/storage/v1/object/authenticated/book-files/"))
+        || !(cover
+            ? (file.getPath().startsWith("/storage/v1/object/public/books/")
+                || file.getPath().startsWith("/storage/v1/object/authenticated/books/")
+                || file.getPath().startsWith("/storage/v1/object/public/book-covers/")
+                || file.getPath().startsWith("/storage/v1/object/authenticated/book-covers/"))
+            : (file.getPath().startsWith("/storage/v1/object/public/books/")
+                || file.getPath().startsWith("/storage/v1/object/authenticated/book-files/")))
         || file.getPath().contains("..")
         || file.getRawPath().contains("%"))
       throw ApiException.bad("File cannot be streamed from this storage location");
+    if (cover && !file.getPath().toLowerCase(Locale.ROOT).matches(".+\\.(png|jpe?g|gif|webp)$"))
+      throw ApiException.bad("Invalid cover image location");
     try {
       String path = file.getPath().replace("/object/public/", "/object/authenticated/");
+      if (cover) {
+        var connection = (java.net.HttpURLConnection) URI.create(url + path).toURL().openConnection();
+        connection.setInstanceFollowRedirects(false);
+        connection.setConnectTimeout(5000);
+        connection.setReadTimeout(10000);
+        connection.setRequestProperty("Authorization", "Bearer " + key);
+        connection.setRequestProperty("apikey", key);
+        try {
+          if (connection.getResponseCode() != 200) throw new ApiException(502, "Cover image unavailable");
+          return new FilterInputStream(connection.getInputStream()) {
+            @Override public void close() throws IOException {
+              try { super.close(); } finally { connection.disconnect(); }
+            }
+          };
+        } catch (Exception failure) {
+          connection.disconnect();
+          throw failure;
+        }
+      }
       var response =
           client.send(
               HttpRequest.newBuilder(URI.create(url + path))

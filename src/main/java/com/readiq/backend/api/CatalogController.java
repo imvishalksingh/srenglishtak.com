@@ -7,6 +7,7 @@ import com.readiq.backend.auth.ApiPrincipal;
 import com.readiq.backend.data.Database;
 import com.readiq.backend.dto.*;
 import com.readiq.backend.service.CatalogService;
+import com.readiq.backend.service.BookCoverService;
 import java.util.*;
 import org.springframework.http.*;
 import org.springframework.security.access.prepost.PreAuthorize;
@@ -18,10 +19,12 @@ import org.springframework.web.bind.annotation.*;
 public class CatalogController {
   private final CatalogService catalog;
   private final Database db;
+  private final BookCoverService covers;
 
-  public CatalogController(CatalogService catalog, Database db) {
+  public CatalogController(CatalogService catalog, Database db, BookCoverService covers) {
     this.catalog = catalog;
     this.db = db;
+    this.covers = covers;
   }
 
   private boolean admin(Authentication a) {
@@ -46,6 +49,21 @@ public class CatalogController {
   @GetMapping("/books/{id}")
   public BookResponse book(@PathVariable UUID id, Authentication a) {
     return BookResponse.from(catalog.book(id, admin(a)));
+  }
+
+  @GetMapping("/books/{id}/cover")
+  public ResponseEntity<byte[]> cover(@PathVariable UUID id, Authentication a) {
+    var book = db.byId("books", id);
+    boolean visible = Boolean.TRUE.equals(book.get("is_visible"));
+    if (!visible && !admin(a)) {
+      if (a == null || !(a.getPrincipal() instanceof ApiPrincipal user)
+          || db.count("select count(*) from book_purchases where user_id=? and book_id=? and status='active'",
+              user.id(), id) == 0) throw ApiException.missing();
+    }
+    byte[] image = covers.image(Objects.toString(book.get("cover_url"), ""));
+    return ResponseEntity.ok().contentType(MediaType.IMAGE_JPEG)
+        .header("Cache-Control", visible ? "public, max-age=3600" : "private, no-store")
+        .header("X-Content-Type-Options", "nosniff").body(image);
   }
 
   @PostMapping("/books")

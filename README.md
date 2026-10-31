@@ -4,6 +4,8 @@ Java 21, Spring Boot 4.0.9, Spring Data JPA, PostgreSQL, Supabase Auth and Stora
 Node/Express is not required to run this backend. The Flutter app, its built-in admin screens,
 and the React admin dashboard use this API.
 
+For the Render-to-Northflank migration, follow [NORTHFLANK_SETUP.md](NORTHFLANK_SETUP.md).
+
 ## Setup
 
 1. Configure the same Supabase project that contains the current app data.

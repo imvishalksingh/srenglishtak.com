@@ -11,11 +11,11 @@ import org.springframework.web.filter.OncePerRequestFilter;
  * addresses.
  */
 public class RateLimitFilter extends OncePerRequestFilter {
-  private final Set<String> trusted;
+  private final TrustedClientAddress addresses;
   private final RateLimitStore store;
 
   public RateLimitFilter(String proxies, RateLimitStore store) {
-    trusted = new HashSet<>(Arrays.stream(proxies.split(",")).map(String::trim).toList());
+    addresses = new TrustedClientAddress(proxies);
     this.store = store;
   }
 
@@ -25,23 +25,11 @@ public class RateLimitFilter extends OncePerRequestFilter {
       throws IOException, ServletException {
     if ("OPTIONS".equals(req.getMethod())
         || ("GET".equals(req.getMethod())
-            && Set.of("/", "/health").contains(req.getRequestURI()))) {
+            && Set.of("/", "/health", "/health/live", "/health/ready").contains(req.getRequestURI()))) {
       chain.doFilter(req, res);
       return;
     }
-    String path = req.getRequestURI(), ip = req.getRemoteAddr();
-    if (trusted.contains(ip)) {
-      String forwarded = req.getHeader("X-Forwarded-For");
-      if (forwarded != null) {
-        String[] hops = forwarded.split(",");
-        for (int i = hops.length - 1; i >= 0; i--) {
-          String candidate = hops[i].trim();
-          if (!candidate.matches("[0-9a-fA-F:.]{2,64}")) break;
-          ip = candidate;
-          if (!trusted.contains(candidate)) break;
-        }
-      }
-    }
+    String path = req.getRequestURI(), ip = addresses.resolve(req);
     boolean strict =
         Set.of(
                 "/api/auth/login",

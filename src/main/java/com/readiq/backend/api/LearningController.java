@@ -113,6 +113,11 @@ public class LearningController {
     return reports.insights(id(a));
   }
 
+  @GetMapping("/user/weekly-goal")
+  public Object weeklyGoal(Authentication a) {
+    return reports.weeklyGoal(id(a));
+  }
+
   @GetMapping("/user/achievements")
   public Object achievements(Authentication a) {
     return reports.achievements(id(a));
@@ -121,6 +126,11 @@ public class LearningController {
   @GetMapping("/user/recommendations")
   public Object recommendations(Authentication a) {
     return reports.recommendations(id(a));
+  }
+
+  @GetMapping("/grammar/overview")
+  public Object grammarOverview(Authentication a) {
+    return learning.grammarOverview(id(a));
   }
 
   @GetMapping("/grammar/progress")
