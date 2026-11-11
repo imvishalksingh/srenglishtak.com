@@ -78,6 +78,7 @@ class BackendIntegrationTest {
   @MockitoBean SupabaseClient supabase;
   @MockitoBean GooglePlayClient google;
   @MockitoBean com.readiq.backend.reader.PlayIntegrityClient integrityGoogle;
+  private final java.util.concurrent.ConcurrentMap<String,JsonNode> integrityVerdicts = new java.util.concurrent.ConcurrentHashMap<>();
   @MockitoBean RazorpayClient razorpay;
   @MockitoSpyBean StorageService storage;
   @Autowired PurchaseService purchases;
@@ -143,10 +144,16 @@ class BackendIntegrationTest {
     jdbc.execute(Files.readString(Path.of("db/003_purchases_and_limits.sql")));
     jdbc.execute(Files.readString(Path.of("db/004_protected_reader.sql")));
     jdbc.execute(Files.readString(Path.of("db/005_admin_cover_storage.sql")));
+    jdbc.execute(Files.readString(Path.of("db/007_profile_onboarding_phone.sql")));
   }
 
   @BeforeEach
   void data() {
+    integrityVerdicts.clear();
+    doAnswer(call -> {
+      String token=call.getArgument(0);
+      return token==null ? null : integrityVerdicts.get(token);
+    }).when(integrityGoogle).decode(anyString());
     jdbc.update("insert into storage.buckets(id,name,public) values('book-files','book-files',false) on conflict(id) do update set public=false");
     doNothing().when(storage).requirePrivateBucket();
     doNothing().when(storage).requirePrivateFile(anyString());
@@ -390,6 +397,7 @@ class BackendIntegrationTest {
 
   @Test
   void challengeScoringTimingAndDuplicateProtection() throws Exception {
+    jdbc.update("update profiles set phone_number=? where id=?", "+919876543210", USER);
     var c = challenge();
     String id = c.get("id").asText(), q = c.get("challenge_questions").get(0).get("id").asText();
     mvc.perform(request(get("/api/challenges"), "user"))
@@ -421,7 +429,8 @@ class BackendIntegrationTest {
     mvc.perform(get("/api/challenges/" + id + "/leaderboard"))
         .andExpect(status().isOk())
         .andExpect(jsonPath("$[0].profiles.full_name").exists())
-        .andExpect(jsonPath("$[0].profiles.email").doesNotExist());
+        .andExpect(jsonPath("$[0].profiles.email").doesNotExist())
+        .andExpect(jsonPath("$[0].profiles.phone_number").doesNotExist());
     postJson("/api/challenges/" + id + "/start", "other", Map.of(), 200);
     jdbc.update(
         "update challenge_attempt_sessions set expires_at=now()-interval '1 minute' where"
@@ -890,7 +899,7 @@ class BackendIntegrationTest {
         "deviceIntegrity", map("deviceRecognitionVerdict", List.of("MEETS_DEVICE_INTEGRITY")),
         "environmentDetails", map("appAccessRiskVerdict", map("appsDetected", List.of("KNOWN_INSTALLED")))));
     String token = "opaque-fixture-" + UUID.randomUUID();
-    when(integrityGoogle.decode(token)).thenReturn(verdict);
+    integrityVerdicts.put(token,verdict);
     var body = map("challenge_id", challenge.path("challenge_id").asText(), "integrity_token", token,
         "signature", readerSign(key, "activate\n" + challenge.path("challenge_id").asText() + "\n" + hash + (initialPage==null ? "" : "\npage\n"+initialPage)));
     if(initialPage!=null) {
@@ -900,13 +909,19 @@ class BackendIntegrationTest {
     }
     JsonNode session;
     if (allowBusy) {
-      var response=mvc.perform(request(post("/api/books/"+book+"/reader/sessions"),account)
-          .contentType("application/json").content(json.writeValueAsString(body))).andReturn().getResponse();
+      var result=mvc.perform(request(post("/api/books/"+book+"/reader/sessions"),account)
+          .contentType("application/json").content(json.writeValueAsString(body))).andReturn();
+      var response=result.getResponse();
       if(response.getStatus()==503) {
         assertEquals("Reader is busy. Please try again shortly",json.readTree(response.getContentAsString()).path("error").asText());
         return null; // Deliberate bounded rendering capacity, not a database/session failure.
       }
-      assertEquals(200,response.getStatus());session=json.readTree(response.getContentAsString());
+      assertEquals(200,response.getStatus(), () -> {
+        var ex=result.getResolvedException();
+        return ex==null ? "Unexpected reader status" : ex.getClass().getSimpleName()+": "+ex.getMessage()+" "+
+          Arrays.stream(ex.getStackTrace()).filter(frame->frame.getClassName().startsWith("com.readiq"))
+          .limit(6).map(Object::toString).collect(java.util.stream.Collectors.joining("; "));
+      });session=json.readTree(response.getContentAsString());
     } else session = postJson("/api/books/" + book + "/reader/sessions", account, body, 200);
     // Reusing a valid, consumed challenge never opens a second reader session.
     postJson("/api/books/" + book + "/reader/sessions", account, body, 403);
@@ -1167,6 +1182,75 @@ class BackendIntegrationTest {
               }
               return null;
             });
+  }
+
+  @Test
+  void onboardingRequiresPhoneAndPersistsOnlyTheAuthenticatedProfile() throws Exception {
+    var body=map("full_name","  Learner  ","class","Class 10th","learning_goal","Board Exams");
+    postJson("/api/user/onboarding", "user", body, 400);
+    body.put("phone_number","12345");
+    postJson("/api/user/onboarding", "user", body, 400);
+    body.put("phone_number","+91 98765 43210");
+    body.put("role","admin"); body.put("id",OTHER); body.put("phone_verified",true);
+    postJson("/api/user/onboarding", null, body, 401);
+    var saved=postJson("/api/user/onboarding", "user", body, 200);
+    assertEquals("+919876543210",saved.path("phone_number").asText());
+    assertTrue(saved.path("onboarding_completed").asBoolean());
+    assertEquals(USER.toString(),saved.path("id").asText());
+    assertEquals("user",saved.path("role").asText());
+    assertEquals("Learner",saved.path("full_name").asText());
+    assertNull(jdbc.queryForObject("select phone_number from profiles where id=?",String.class,OTHER));
+    mvc.perform(request(get("/api/auth/me"),"user")).andExpect(status().isOk())
+        .andExpect(jsonPath("$.phone_number").value("+919876543210"))
+        .andExpect(jsonPath("$.onboarding_completed").value(true));
+    mvc.perform(request(patch("/api/user/profile"),"user").contentType("application/json")
+        .content("{\"phone_number\":null}" )).andExpect(status().isBadRequest());
+  }
+
+  @Test
+  void legacyProfilesMustAddPhoneWithoutChangingExistingLearningData() throws Exception {
+    jdbc.update("update profiles set full_name='Existing Learner',class='Class 10th',learning_goal='Board Exams',"
+        + "onboarding_completed_at=now(),phone_number=null where id=?",USER);
+    mvc.perform(request(get("/api/auth/me"),"user")).andExpect(status().isOk())
+        .andExpect(jsonPath("$.onboarding_completed").value(false));
+    mvc.perform(request(get("/api/user/profile"),"user")).andExpect(status().isOk())
+        .andExpect(jsonPath("$.onboarding_completed").value(false));
+    mvc.perform(request(patch("/api/user/profile"),"user").contentType("application/json")
+        .content("{\"phone_number\":\"98765 43210\"}"))
+        .andExpect(status().isOk()).andExpect(jsonPath("$.phone_number").value("+919876543210"))
+        .andExpect(jsonPath("$.onboarding_completed").value(true))
+        .andExpect(jsonPath("$.full_name").value("Existing Learner"))
+        .andExpect(jsonPath("$.class").value("Class 10th"))
+        .andExpect(jsonPath("$.learning_goal").value("Board Exams"));
+    mvc.perform(request(get("/api/auth/me"),"user")).andExpect(status().isOk())
+        .andExpect(jsonPath("$.onboarding_completed").value(true));
+    assertNull(jdbc.queryForObject("select phone_number from profiles where id=?",String.class,OTHER));
+  }
+
+  @Test
+  void ordinaryProfileUpdatesCannotForgeOnboardingCompletion() throws Exception {
+    mvc.perform(request(patch("/api/user/profile"),"user").contentType("application/json")
+        .content("{\"class\":\"Class 12th\",\"onboarding_completed\":true,\"onboarding_completed_at\":\"2026-01-01T00:00:00Z\"}"))
+        .andExpect(status().isOk()).andExpect(jsonPath("$.onboarding_completed").value(false));
+    jdbc.execute(Files.readString(Path.of("db/007_profile_onboarding_phone.sql")));
+    assertNull(jdbc.queryForObject("select onboarding_completed_at from profiles where id=?",Object.class,USER));
+  }
+
+  @Test
+  void phoneMigrationPreservesLegacyCompletedProfilesWithoutGrandfatheringFutureIncompleteProfiles() throws Exception {
+    // Isolate DDL from pooled application queries; never drop/re-add live profile columns.
+    jdbc.execute("create table public.phone_migration_fixture(id uuid primary key,class text)");
+    try {
+      jdbc.update("insert into phone_migration_fixture(id,class) values(?,'Class 10th'),(?,null)",USER,OTHER);
+      String migration=Files.readString(Path.of("db/007_profile_onboarding_phone.sql"))
+          .replace("public.profiles","public.phone_migration_fixture")
+          .replace("table_name='profiles'","table_name='phone_migration_fixture'");
+      jdbc.execute(migration);
+      assertNotNull(jdbc.queryForObject("select onboarding_completed_at from phone_migration_fixture where id=?",Object.class,USER));
+      jdbc.update("update phone_migration_fixture set class='Class 12th' where id=?",OTHER);
+      jdbc.execute(migration);
+      assertNull(jdbc.queryForObject("select onboarding_completed_at from phone_migration_fixture where id=?",Object.class,OTHER));
+    } finally { jdbc.execute("drop table public.phone_migration_fixture"); }
   }
 
   @Test

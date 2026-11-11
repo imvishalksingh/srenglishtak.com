@@ -8,6 +8,9 @@ CREATE TABLE IF NOT EXISTS profiles (
   role TEXT DEFAULT 'user',
   class TEXT,
   learning_goal TEXT,
+  phone_number TEXT CONSTRAINT profiles_phone_number_e164_check
+    CHECK (phone_number IS NULL OR phone_number ~ '^\+[1-9][0-9]{7,14}$'),
+  onboarding_completed_at TIMESTAMPTZ,
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
 CREATE TABLE IF NOT EXISTS books (

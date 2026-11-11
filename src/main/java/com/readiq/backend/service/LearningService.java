@@ -149,15 +149,34 @@ public class LearningService {
   }
 
   public Map<String, Object> profile(UUID user) {
-    return db.byId("profiles", user);
+    return profileResult(db.byId("profiles", user));
+  }
+
+  private Map<String,Object> profileResult(Map<String,Object> row) {
+    var result = new LinkedHashMap<>(row);
+    result.put("onboarding_completed", row.get("onboarding_completed_at") != null
+        && Objects.toString(row.get("phone_number"), "").matches("\\+[1-9][0-9]{7,14}"));
+    return result;
+  }
+
+  @Transactional
+  public Map<String,Object> completeOnboarding(UUID user, Map<String,Object> body) {
+    String name=text(body,"full_name",100,true).strip();
+    String phone=PhoneNumber.normalize(body.get("phone_number"));
+    String studentClass=text(body,"class",120,true).strip();
+    String goal=text(body,"learning_goal",500,true).strip();
+    return profileResult(db.one("update profiles set full_name=?,phone_number=?,class=?,learning_goal=?,"
+        + "onboarding_completed_at=coalesce(onboarding_completed_at,now()) where id=? returning *",
+        name,phone,studentClass,goal,user));
   }
 
   public Map<String, Object> updateProfile(UUID user, Map<String, Object> b) {
-    var v = fields(b, "full_name", "avatar_url", "class", "learning_goal");
+    var v = fields(b, "full_name", "avatar_url", "class", "learning_goal", "phone_number");
+    if (v.containsKey("phone_number")) v.put("phone_number",PhoneNumber.normalize(v.get("phone_number")));
     for (String f : List.of("full_name", "class", "learning_goal", "avatar_url"))
       if (v.get(f) != null && v.get(f).toString().length() > (f.equals("avatar_url") ? 2000 : 500))
         throw ApiException.bad("Invalid " + f);
-    return db.update("profiles", user, v);
+    return profileResult(db.update("profiles", user, v));
   }
 
   public Object grammarOverview(UUID user) {

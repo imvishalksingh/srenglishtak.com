@@ -14,6 +14,8 @@ public record AuthResponse(Profile user, Session session) {
       String role,
       @JsonProperty("class") String studentClass,
       String learning_goal,
+      String phone_number,
+      boolean onboarding_completed,
       String created_at) {
     public static Profile from(Map<String, Object> r) {
       return new Profile(
@@ -24,6 +26,9 @@ public record AuthResponse(Profile user, Session session) {
           s(r, "role"),
           s(r, "class"),
           s(r, "learning_goal"),
+          s(r, "phone_number"),
+          r.get("onboarding_completed_at") != null
+              && Objects.toString(r.get("phone_number"), "").matches("\\+[1-9][0-9]{7,14}"),
           s(r, "created_at"));
     }
   }

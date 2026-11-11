@@ -4,6 +4,15 @@ import com.fasterxml.jackson.annotation.*;
 import java.util.*;
 
 public final class ProfileRequest extends Payload {
+  private String phone_number;
+  @JsonProperty("phone_number")
+  public String getPhone_number() { return phone_number; }
+  @JsonProperty("phone_number")
+  public void setPhone_number(String value) {
+    this.phone_number=value;
+    set("phone_number",value);
+  }
+
   private String full_name;
 
   @JsonProperty("full_name")

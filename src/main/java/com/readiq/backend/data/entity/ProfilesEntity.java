@@ -40,6 +40,14 @@ public class ProfilesEntity {
   @JsonProperty("learning_goal")
   public String learning_goal;
 
+  @Column(name = "phone_number", columnDefinition = "text")
+  @JsonProperty("phone_number")
+  public String phone_number;
+
+  @Column(name = "onboarding_completed_at")
+  @JsonProperty("onboarding_completed_at")
+  public OffsetDateTime onboarding_completed_at;
+
   @Column(name = "created_at")
   @JsonProperty("created_at")
   public OffsetDateTime created_at;

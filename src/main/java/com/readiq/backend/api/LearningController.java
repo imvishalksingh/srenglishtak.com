@@ -108,6 +108,17 @@ public class LearningController {
     return learning.updateProfile(id(a), b);
   }
 
+  @PostMapping("/user/onboarding")
+  public Object completeOnboarding(Authentication a,
+      @jakarta.validation.Valid @RequestBody OnboardingRequest request) {
+    return learning.completeOnboarding(id(a), mapOnboarding(request));
+  }
+
+  private Map<String,Object> mapOnboarding(OnboardingRequest request) {
+    return Map.of("full_name", request.full_name(), "phone_number", request.phone_number(),
+        "class", request.studentClass(), "learning_goal", request.learning_goal());
+  }
+
   @GetMapping("/user/insights")
   public Object insights(Authentication a) {
     return reports.insights(id(a));
