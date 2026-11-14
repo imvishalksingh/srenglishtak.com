@@ -145,6 +145,7 @@ class BackendIntegrationTest {
     jdbc.execute(Files.readString(Path.of("db/004_protected_reader.sql")));
     jdbc.execute(Files.readString(Path.of("db/005_admin_cover_storage.sql")));
     jdbc.execute(Files.readString(Path.of("db/007_profile_onboarding_phone.sql")));
+    jdbc.execute(Files.readString(Path.of("db/008_spoken_english.sql")));
   }
 
   @BeforeEach
@@ -159,7 +160,7 @@ class BackendIntegrationTest {
     doNothing().when(storage).requirePrivateFile(anyString());
     jdbc.execute("truncate api_rate_limits,revoked_access_tokens,purchase_revocations");
     jdbc.execute(
-        "truncate auth.users,grammar_units,cbse_categories,daily_tips,vocabulary,challenges"
+        "truncate auth.users,grammar_units,cbse_categories,daily_tips,vocabulary,challenges,spoken_english_lessons"
             + " cascade");
     for (UUID id : List.of(ADMIN, USER, OTHER)) {
       jdbc.update("insert into auth.users(id) values(?)", id);
@@ -1251,6 +1252,90 @@ class BackendIntegrationTest {
       jdbc.execute(migration);
       assertNull(jdbc.queryForObject("select onboarding_completed_at from phone_migration_fixture where id=?",Object.class,OTHER));
     } finally { jdbc.execute("drop table public.phone_migration_fixture"); }
+  }
+
+  private Map<String,Object> spokenBody(String title,String category,boolean published,int order) {
+    return map("title",title,"category",category,"summary","A short conversation",
+        "content","A: Good morning.\nB: How are you?","is_published",published,"lesson_order",order);
+  }
+
+  @Test
+  void spokenEnglishDraftsStayPrivateAndOnlyAdminsCanManageLessons() throws Exception {
+    var body=spokenBody("Greetings","conversation",false,0);
+    postJson("/api/admin/spoken-english/lessons",null,body,401);
+    postJson("/api/admin/spoken-english/lessons","user",body,403);
+    var draft=postJson("/api/admin/spoken-english/lessons","admin",body,201);
+    String id=draft.path("id").asText();
+    mvc.perform(request(get("/api/spoken-english/lessons"),"user")).andExpect(status().isOk())
+        .andExpect(jsonPath("$.length()").value(0));
+    mvc.perform(request(get("/api/spoken-english/lessons/"+id),"user")).andExpect(status().isNotFound());
+    mvc.perform(request(get("/api/admin/spoken-english/lessons"),"admin")).andExpect(status().isOk())
+        .andExpect(jsonPath("$.length()").value(1)).andExpect(jsonPath("$[0].content").doesNotExist());
+    mvc.perform(request(get("/api/admin/spoken-english/lessons/"+id),"admin")).andExpect(status().isOk())
+        .andExpect(jsonPath("$.content").value(body.get("content")));
+    body.put("is_published",true);
+    mvc.perform(request(put("/api/admin/spoken-english/lessons/"+id),"admin").contentType("application/json")
+        .content(json.writeValueAsString(body))).andExpect(status().isOk());
+    mvc.perform(request(get("/api/spoken-english/lessons"),"user")).andExpect(status().isOk())
+        .andExpect(header().string("Cache-Control","private, no-store"))
+        .andExpect(jsonPath("$.length()").value(1)).andExpect(jsonPath("$[0].content").doesNotExist());
+    mvc.perform(request(get("/api/spoken-english/lessons/"+id),"user")).andExpect(status().isOk())
+        .andExpect(jsonPath("$.content").value(body.get("content")));
+    mvc.perform(request(put("/api/admin/spoken-english/lessons/"+id),"user").contentType("application/json")
+        .content(json.writeValueAsString(body))).andExpect(status().isForbidden());
+    mvc.perform(request(delete("/api/admin/spoken-english/lessons/"+id),"user")).andExpect(status().isForbidden());
+    body.put("is_published",false);
+    mvc.perform(request(put("/api/admin/spoken-english/lessons/"+id),"admin").contentType("application/json")
+        .content(json.writeValueAsString(body))).andExpect(status().isOk());
+    mvc.perform(request(get("/api/spoken-english/lessons/"+id),"user")).andExpect(status().isNotFound());
+    mvc.perform(request(delete("/api/admin/spoken-english/lessons/"+id),"admin")).andExpect(status().isNoContent());
+    mvc.perform(request(get("/api/admin/spoken-english/lessons/"+id),"admin")).andExpect(status().isNotFound());
+  }
+
+  @Test
+  void spokenEnglishValidatesInputsAndIgnoresReadOnlyFields() throws Exception {
+    mvc.perform(get("/api/spoken-english/lessons")).andExpect(status().isUnauthorized());
+    mvc.perform(request(get("/api/admin/spoken-english/lessons"),"user")).andExpect(status().isForbidden());
+    mvc.perform(request(get("/api/admin/spoken-english/lessons/"+USER),"user")).andExpect(status().isForbidden());
+    mvc.perform(request(get("/api/spoken-english/lessons").param("category","' or 1=1"),"user"))
+        .andExpect(status().isBadRequest());
+    for (var field:List.of("title","content","category")) {
+      var body=spokenBody("Greetings","conversation",false,0);body.put(field," ");
+      postJson("/api/admin/spoken-english/lessons","admin",body,400);
+    }
+    var body=spokenBody("Greetings","conversation",false,-1);
+    postJson("/api/admin/spoken-english/lessons","admin",body,400);
+    body=spokenBody("Greetings","conversation",false,0);body.put("content","x".repeat(40001));
+    postJson("/api/admin/spoken-english/lessons","admin",body,400);
+    body=spokenBody("Greetings","conversation",false,0);body.put("id",USER);body.put("created_at","2000-01-01");
+    var saved=postJson("/api/admin/spoken-english/lessons","admin",body,201);
+    assertNotEquals(USER.toString(),saved.path("id").asText());
+    assertFalse(saved.path("created_at").asText().startsWith("2000"));
+    mvc.perform(request(get("/api/spoken-english/lessons/not-a-uuid"),"user")).andExpect(status().isBadRequest());
+  }
+
+  @Test
+  void spokenEnglishCategoriesAndLessonOrderingComeFromStoredContent() throws Exception {
+    postJson("/api/admin/spoken-english/lessons","admin",spokenBody("Later","conversation",true,10),201);
+    postJson("/api/admin/spoken-english/lessons","admin",spokenBody("First","conversation",true,2),201);
+    postJson("/api/admin/spoken-english/lessons","admin",spokenBody("Sounds","pronunciation",true,0),201);
+    mvc.perform(request(get("/api/spoken-english/lessons").param("category","conversation"),"user"))
+        .andExpect(status().isOk()).andExpect(jsonPath("$.length()").value(2))
+        .andExpect(jsonPath("$[0].title").value("First")).andExpect(jsonPath("$[1].title").value("Later"));
+    mvc.perform(request(get("/api/spoken-english/lessons/"+UUID.randomUUID()),"user")).andExpect(status().isNotFound());
+  }
+
+  @Test
+  void spokenEnglishMigrationPreservesContentAndBlocksDirectClientRoles() throws Exception {
+    postJson("/api/admin/spoken-english/lessons","admin",spokenBody("Stored","speaking",false,0),201);
+    jdbc.execute(Files.readString(Path.of("db/008_spoken_english.sql")));
+    jdbc.execute(Files.readString(Path.of("db/008_spoken_english.sql")));
+    assertEquals(1,jdbc.queryForObject("select count(*) from spoken_english_lessons",Integer.class));
+    assertTrue(jdbc.queryForObject("select relrowsecurity from pg_class where oid='public.spoken_english_lessons'::regclass",Boolean.class));
+    for(String role:List.of("anon","authenticated")) {
+      assertFalse(jdbc.queryForObject("select has_table_privilege(?, 'public.spoken_english_lessons','SELECT')",Boolean.class,role));
+      assertFalse(jdbc.queryForObject("select has_table_privilege(?, 'public.spoken_english_lessons','INSERT,UPDATE,DELETE')",Boolean.class,role));
+    }
   }
 
   @Test

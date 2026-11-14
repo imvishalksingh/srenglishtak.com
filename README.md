@@ -143,3 +143,5 @@ Google flow: [Supabase ID token sign-in](https://supabase.com/docs/reference/jav
 +Payments default to disabled. iOS buying is not implemented in this release.
 +
 Protected reader rollout and verification: [PROTECTED_READER_SETUP.md](PROTECTED_READER_SETUP.md). Coordinate the backend, migration and Google Play release; there is no legacy raw-PDF fallback.
+
+Spoken English module setup and migration: [SPOKEN_ENGLISH_SETUP.md](SPOKEN_ENGLISH_SETUP.md).

@@ -32,6 +32,7 @@ public class JpaRecordStore {
           Map.entry("quiz_attempts", QuizAttemptsEntity.class),
           Map.entry("vocabulary", VocabularyEntity.class),
           Map.entry("daily_tips", DailyTipsEntity.class),
+          Map.entry("spoken_english_lessons", SpokenEnglishLessonsEntity.class),
           Map.entry("challenges", ChallengesEntity.class),
           Map.entry("challenge_questions", ChallengeQuestionsEntity.class),
           Map.entry("challenge_results", ChallengeResultsEntity.class),

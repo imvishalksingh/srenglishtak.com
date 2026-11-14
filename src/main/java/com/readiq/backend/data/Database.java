@@ -28,6 +28,7 @@ public class Database {
           "quiz_attempts",
           "vocabulary",
           "daily_tips",
+          "spoken_english_lessons",
           "challenges",
           "challenge_questions",
           "challenge_results",
